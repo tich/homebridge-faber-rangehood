@@ -1,17 +1,41 @@
 {
-  "pluginAlias": "ExampleHomebridgePlugin",
+  "pluginAlias": "FaberRangeHood",
   "pluginType": "platform",
   "singular": true,
-  "strictValidation": false,
+  "strictValidation": true,
   "schema": {
     "type": "object",
-    "required": ["name"],
+    "required": ["auth_mode", "device_ids"],
     "additionalProperties": false,
     "properties": {
-      "name": {
-        "title": "Name",
+      "auth_mode": {
+        "title": "Auth Mode",
         "type": "string",
-        "default": "Example Dynamic Platform"
+        "default": "token",
+        "oneOf": [
+          {
+            "title": "Token",
+            "enum": [
+              "token"
+            ]
+          }
+        ]
+      },
+      "refresh_token": {
+        "title": "Refresh Token",
+        "type": "string",
+        "placeholder": "eyJraWQiO...",
+        "condition": {
+          "functionBody": "return model.auth_mode === 'token';"
+        }
+      },
+      "device_ids": {
+        "type": "array",
+        "items": {
+          "title": "Device ID",
+          "type": "string",
+          "placeholder": "PINb12jghtk23D9WEoweif"
+        }
       }
     }
   }
