@@ -13,4 +13,6 @@ export const ASTARTE_API_ENDPOINT = '/appengine/v1';
 
 export const ASTARTE_INTERFACE_DEVICE_DETAILS = 'com.faberspa.DeviceDetails';
 export const ASTARTE_INTERFACE_HOOD_STATUS = 'com.faberspa.connectedhood.HoodStatus';
-export const ASTARTE_INTERFACE_CONTROL = 'com.faberspa.connectedhood.Control';
+export const ASTARTE_INTERFACE_HOOD_FEATURES = 'com.faberspa.connectedhood.Features';
+export const ASTARTE_INTERFACE_HOOD_MOTOR_PROPERTIES = 'com.faberspa.connectedhood.MotorProperties';
+export const ASTARTE_INTERFACE_HOOD_CONTROL = 'com.faberspa.connectedhood.Control';

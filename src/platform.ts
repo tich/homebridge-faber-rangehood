@@ -4,7 +4,7 @@ import * as Path from 'path';
 import { PLATFORM_NAME, PLUGIN_NAME } from './settings.js';
 import { Astarte } from './api/astarte.js';
 import { ObjectStore } from './lib/objectstore.js';
-import { DeviceFactory } from './devices/factory.js';
+import { DeviceFactory, INFO_VERSION } from './devices/factory.js';
 
 /**
  * FaberHomebridgePlatform
@@ -89,6 +89,18 @@ export class FaberHomebridgePlatform implements DynamicPlatformPlugin {
         // the accessory already exists
         this.log.info('Restoring existing accessory from cache:', existingAccessory.displayName);
 
+        // Check if the device info needs to be updated
+        if (existingAccessory.context.device.info_version !== INFO_VERSION) {
+          let deviceInfo = undefined;
+          try {
+            deviceInfo = await DeviceFactory.getDeviceInfo(this.log, this.astarte, deviceId);
+          } catch(error) {
+            this.log.error('Failed to get device info for device ID', deviceId, 'Skipping it');
+            continue;
+          }
+          existingAccessory.context.device = deviceInfo!;
+        }
+
         // create the accessory handler for the restored accessory
         // Accessory kind is stored in accessory.context.device
         DeviceFactory.constructDevice(this, existingAccessory);
@@ -100,7 +112,7 @@ export class FaberHomebridgePlatform implements DynamicPlatformPlugin {
         try {
           deviceInfo = await DeviceFactory.getDeviceInfo(this.log, this.astarte, deviceId);
         } catch(error) {
-          this.log.error('Failed to get device kind for device ID', deviceId, 'Skipping it');
+          this.log.error('Failed to get device info for device ID', deviceId, 'Skipping it');
           continue;
         }
 

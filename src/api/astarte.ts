@@ -89,7 +89,7 @@ export class Astarte {
           // Retry the call
           await this.fetchUserId(true);
         } else {
-          this.log.error('Failed to query Astarte user info:', error);
+          this.log.error('Failed to query Astarte user info:', error.status, error.message);
           throw new NetworkServiceError;
         }
       });
@@ -137,7 +137,7 @@ export class Astarte {
           // Retry the call
           await this.refreshToken(true);
         } else {
-          this.log.error('Failed to query Astarte token:', error);
+          this.log.error('Failed to query Astarte token:', error.status, error.message);
           this.id_token = undefined;
           throw new NetworkServiceError;
         }
@@ -164,7 +164,7 @@ export class Astarte {
           // Retry the call
           returned_data = await this._doRequest(device_id, api_interface, method, value, true);
         } else {
-          this.log.error('Failed to query Astarte', api_interface, error);
+          this.log.error('Failed to query Astarte', api_interface, error.status, error.message);
           throw new NetworkServiceError;
         }
       });

@@ -1,9 +1,14 @@
-import { CharacteristicValue, HAPStatus, PlatformAccessory, Service } from 'homebridge';
+import { CharacteristicValue, HAPStatus, Logging, PlatformAccessory, Service } from 'homebridge';
 import zod from 'zod';
 import { FaberHomebridgePlatform } from '../platform.js';
 import { BaseDevice } from './base.js';
-import { AstarteRequestMethod } from '../api/astarte.js';
-import { ASTARTE_INTERFACE_CONTROL, ASTARTE_INTERFACE_HOOD_STATUS } from '../api/constants.js';
+import { Astarte, AstarteRequestMethod } from '../api/astarte.js';
+import {
+  ASTARTE_INTERFACE_HOOD_CONTROL,
+  ASTARTE_INTERFACE_HOOD_FEATURES,
+  ASTARTE_INTERFACE_HOOD_MOTOR_PROPERTIES,
+  ASTARTE_INTERFACE_HOOD_STATUS }
+  from '../api/constants.js';
 import { TokenExpiredError, UnknownResponseError } from '../lib/errors.js';
 import { mapRange } from '../lib/utils.js';
 
@@ -11,6 +16,9 @@ export class RangeHoodDevice extends BaseDevice {
   private fan_service: Service;
   private light_service: Service;
   private readonly refresh_interval_ms = 3 * 1000;
+  private readonly max_fan_speed: number;
+  private readonly max_light_intensity: number;
+  private readonly max_color_temperature_settings: number;
   
   constructor(
     platform: FaberHomebridgePlatform,
@@ -19,33 +27,35 @@ export class RangeHoodDevice extends BaseDevice {
     super(platform, accessory);
 
     // TODO Adaptive Lighting support? https://github.com/homebridge-plugins/homebridge-meross/blob/latest/lib/device/light-cct.js#L97
-    // TODO discover allowed light intensities
     // TODO add filter maintenance services (https://developers.homebridge.io/#/service/FilterMaintenance)
-    // TODO better discovery of services
+
+    this.max_fan_speed = this.device_info.features.motor.maxFanSpeed;
+    this.max_light_intensity = this.device_info.features.features.lights.channels[1].maxIntensity;
+    this.max_color_temperature_settings = this.device_info.features.features.lights.channels[2].maxIntensity;
 
     // Get the LightBulb service if it exists, otherwise create a new LightBulb service
     this.light_service = this.accessory.getService(this.platform.Service.Lightbulb) || this.accessory.addService(this.platform.Service.Lightbulb);
 
     // The light's default name is "<kind> Light" (so in this case "RangeHood Light")
-    this.light_service.setCharacteristic(this.platform.Characteristic.Name, accessory.context.device.kind + ' Light');
+    this.light_service.setCharacteristic(this.platform.Characteristic.Name, this.device_info.kind + ' Light');
 
     // register handlers for the light's characteristics
     this.light_service.getCharacteristic(this.platform.Characteristic.On)
       .onSet(this.setLightOn.bind(this));
     this.light_service.getCharacteristic(this.platform.Characteristic.Brightness)
       .onSet(this.setLightBrightness.bind(this))
-      .setProps({ minStep: 50 });
+      .setProps({ minStep: 100 / this.max_light_intensity });
     this.light_service.getCharacteristic(this.platform.Characteristic.ColorTemperature)
       .onSet(this.setColorTemperature.bind(this));
 
     this.fan_service = this.accessory.getService(this.platform.Service.Fanv2) || this.accessory.addService(this.platform.Service.Fanv2);
-    this.fan_service.setCharacteristic(this.platform.Characteristic.Name, accessory.context.device.kind + ' Fan');
+    this.fan_service.setCharacteristic(this.platform.Characteristic.Name, this.device_info.kind + ' Fan');
 
     this.fan_service.getCharacteristic(this.platform.Characteristic.Active)
       .onSet(this.setFanActive.bind(this));
     this.fan_service.getCharacteristic(this.platform.Characteristic.RotationSpeed)
       .onSet(this.setFanSpeed.bind(this))
-      .setProps({ minStep: 33.33 });
+      .setProps({ minStep: 100 / this.max_fan_speed });
 
     setTimeout(() => this.updateHoodStatus(), this.refresh_interval_ms);
   }
@@ -87,7 +97,7 @@ export class RangeHoodDevice extends BaseDevice {
   
     let parsed_data = undefined;
     try {
-      const data = await this.platform.astarte.doRequest(this.accessory.context.device.id, ASTARTE_INTERFACE_HOOD_STATUS, AstarteRequestMethod.GET, {});
+      const data = await this.platform.astarte.doRequest(this.device_info.id, ASTARTE_INTERFACE_HOOD_STATUS, AstarteRequestMethod.GET, {});
       parsed_data = ResponseFormat.safeParse(data);
       if (!parsed_data.success) {
         this.platform.log.error('Failed to parse the hood status response', parsed_data.error, 'Received:', JSON.stringify(data));
@@ -108,18 +118,18 @@ export class RangeHoodDevice extends BaseDevice {
     if (parsed_data!.data!.data.lights.channels[1].intensity.value > 0) {
       this.light_service.updateCharacteristic(this.platform.Characteristic.On, true);
       this.light_service.updateCharacteristic(this.platform.Characteristic.Brightness,
-        mapRange(parsed_data!.data!.data.lights.channels[1].intensity.value, 0, 2, 0, 100));
+        mapRange(parsed_data!.data!.data.lights.channels[1].intensity.value, 0, this.max_light_intensity, 0, 100));
     } else {
       this.light_service.updateCharacteristic(this.platform.Characteristic.On, false);
     }
 
     this.light_service.updateCharacteristic(this.platform.Characteristic.ColorTemperature,
-      mapRange(parsed_data!.data!.data.lights.channels[1].intensity.value, 0, 4, 140, 500));
+      mapRange(parsed_data!.data!.data.lights.channels[1].intensity.value, 0, this.max_color_temperature_settings, 140, 500));
 
     if (parsed_data!.data!.data.fan.speed.value > 0) {
       this.fan_service.updateCharacteristic(this.platform.Characteristic.Active, this.platform.Characteristic.Active.ACTIVE);
       this.fan_service.updateCharacteristic(this.platform.Characteristic.RotationSpeed,
-        mapRange(parsed_data!.data!.data.fan.speed.value, 0, 3, 0, 100));
+        mapRange(parsed_data!.data!.data.fan.speed.value, 0, this.max_fan_speed, 0, 100));
     } else {
       this.fan_service.updateCharacteristic(this.platform.Characteristic.Active, this.platform.Characteristic.Active.INACTIVE);
     }
@@ -127,12 +137,57 @@ export class RangeHoodDevice extends BaseDevice {
     setTimeout(() => this.updateHoodStatus(), this.refresh_interval_ms);
   }
 
+  public static async getDeviceFeatures(log: Logging, astarte: Astarte, device_id: string) {
+    const FeaturesResponseFormat = zod.object({
+      data: zod.object({
+        filters: zod.object({
+          fc: zod.object({
+            replacementHours: zod.number(),
+          }),
+          fg: zod.object({
+            replacementHours: zod.number(),
+          }),
+        }),
+        lights: zod.object({
+          channels: zod.object({
+            1: zod.object({
+              maxIntensity: zod.number(),
+            }),
+            2: zod.object({
+              maxIntensity: zod.number(),
+            }),
+          }),
+        }),
+      }),
+    });
+    const feature_data = await astarte.doRequest(device_id, ASTARTE_INTERFACE_HOOD_FEATURES, AstarteRequestMethod.GET, {});
+    const parsed_feature_data = FeaturesResponseFormat.safeParse(feature_data);
+    if (!parsed_feature_data.success) {
+      log.error('Failed to parse the device features response', parsed_feature_data.error, 'Received:', JSON.stringify(feature_data));
+      throw new UnknownResponseError;
+    }
+
+    const MotorPropertiesResponseFormat = zod.object({
+      data: zod.object({
+        maxFanSpeed: zod.number(),
+      }),
+    });
+    const motor_data = await astarte.doRequest(device_id, ASTARTE_INTERFACE_HOOD_MOTOR_PROPERTIES, AstarteRequestMethod.GET, {});
+    const parsed_motor_data = MotorPropertiesResponseFormat.safeParse(motor_data);
+    if (!parsed_motor_data.success) {
+      log.error('Failed to parse the device motor properties response', parsed_motor_data.error, 'Received:', JSON.stringify(motor_data));
+      throw new UnknownResponseError;
+    }
+
+    return { features: parsed_feature_data.data!.data, motor: parsed_motor_data.data!.data };
+  }
+
   private async sendControlRequest(api_interface: string, data: Record<string, unknown>) {
     try {
       this.platform.log.info('Sending:', JSON.stringify(data));
       await this.platform.astarte.doRequest(
-        this.accessory.context.device.id,
-        ASTARTE_INTERFACE_CONTROL + api_interface,
+        this.device_info.id,
+        ASTARTE_INTERFACE_HOOD_CONTROL + api_interface,
         AstarteRequestMethod.POST,
         data);
     } catch(error) {
@@ -153,7 +208,7 @@ export class RangeHoodDevice extends BaseDevice {
     this.platform.log.info('Turning light', isOn ? 'On': 'Off');
     const configuredBrightness = this.light_service.getCharacteristic(this.platform.Characteristic.Brightness).value! as number;
     this.platform.log.info('Configured brightness:', configuredBrightness);
-    const intensityFromBrightness = mapRange(configuredBrightness, 0, 100, 0, 2);
+    const intensityFromBrightness = mapRange(configuredBrightness, 0, 100, 0, this.max_light_intensity);
     this.platform.log.info('Intensity from brightness:', intensityFromBrightness);
     const post_data = {
       data: isOn ? intensityFromBrightness ? intensityFromBrightness : 1 : 0,
@@ -164,7 +219,7 @@ export class RangeHoodDevice extends BaseDevice {
   async setLightBrightness(value: CharacteristicValue) {
     const brightness = value as number;
     this.platform.log.info('Setting light brightness to', brightness);
-    const intensityFromBrightness = mapRange(brightness, 0, 100, 0, 2);
+    const intensityFromBrightness = mapRange(brightness, 0, 100, 0, this.max_light_intensity);
     this.platform.log.info('Intensity from brightness:', intensityFromBrightness);
     const post_data = {
       data: intensityFromBrightness,
@@ -175,7 +230,7 @@ export class RangeHoodDevice extends BaseDevice {
   async setColorTemperature(value: CharacteristicValue) {
     const temperature = value as number;
     this.platform.log.info('Setting color temperature to', temperature);
-    const intensityFromTemperature = Math.round(mapRange(temperature, 140, 500, 0, 4));
+    const intensityFromTemperature = Math.round(mapRange(temperature, 140, 500, 0, this.max_color_temperature_settings));
     this.platform.log.info('Intensity from temperature:', intensityFromTemperature);
     const post_data = {
       data: intensityFromTemperature,
@@ -188,7 +243,7 @@ export class RangeHoodDevice extends BaseDevice {
     this.platform.log.info('Turning fan', isOn ? 'On': 'Off');
     const configuredSpeed = this.fan_service.getCharacteristic(this.platform.Characteristic.RotationSpeed).value! as number;
     this.platform.log.info('Configured speed:', configuredSpeed);
-    const intensityFromSpeed = Math.round(mapRange(configuredSpeed, 0, 100, 0, 3));
+    const intensityFromSpeed = Math.round(mapRange(configuredSpeed, 0, 100, 0, this.max_fan_speed));
     this.platform.log.info('Intensity from speed:', intensityFromSpeed);
     const post_data = {
       data: isOn ? intensityFromSpeed ? intensityFromSpeed : 1 : 0,
@@ -199,7 +254,7 @@ export class RangeHoodDevice extends BaseDevice {
   async setFanSpeed(value: CharacteristicValue) {
     const speed = value as number;
     this.platform.log.info('Setting fan speed to', speed);
-    const intensityFromSpeed = Math.round(mapRange(speed, 0, 100, 0, 3));
+    const intensityFromSpeed = Math.round(mapRange(speed, 0, 100, 0, this.max_fan_speed));
     this.platform.log.info('Intensity from speed:', intensityFromSpeed);
     const post_data = {
       data: intensityFromSpeed,
