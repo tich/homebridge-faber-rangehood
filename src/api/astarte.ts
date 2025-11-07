@@ -158,7 +158,7 @@ export class Astarte {
       })
       .catch(async (error) => {
         if (!is_retry && error.status === 403) {
-          // This error is returned if the the Astarte ID token is expired
+          // This error is returned if the Astarte ID token is expired
           // Refresh the ID token
           await this.refreshToken();
           // Retry the call

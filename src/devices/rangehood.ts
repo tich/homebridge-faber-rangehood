@@ -138,6 +138,7 @@ export class RangeHoodDevice extends BaseDevice {
   }
 
   public static async getDeviceFeatures(log: Logging, astarte: Astarte, device_id: string) {
+    // TODO are any of these features optional?
     const FeaturesResponseFormat = zod.object({
       data: zod.object({
         filters: zod.object({
