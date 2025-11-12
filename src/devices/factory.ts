@@ -7,6 +7,10 @@ import { UnknownDeviceTypeError, UnknownResponseError } from '../lib/errors.js';
 import { RangeHoodDevice } from './rangehood.js';
 import { BaseDevice } from './base.js';
 
+/**
+ * This helps us know when to discard device info from the accessory cache,
+ * and compute it again. Bump it up whenever you make a change to the `DeviceInfo` interface
+ */
 export const INFO_VERSION = 1;
 
 export interface DeviceInfo {
@@ -18,6 +22,7 @@ export interface DeviceInfo {
 }
 
 export class DeviceFactory {
+  // TODO merge the following two maps
   private static readonly AstarteTypeToDeviceKind: Record<string, string> = {
     'HOOD': 'RangeHood',
   };

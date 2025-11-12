@@ -12,6 +12,9 @@ export enum AstarteRequestMethod {
   POST = 'post'
 }
 
+/**
+ * A class that's in charge of interfacing with the Astarte Auth and API endpoints
+ */
 export class Astarte {
   private readonly openid_session: OpenIDSession;
   private readonly auth_request: AxiosInstance;
@@ -172,15 +175,39 @@ export class Astarte {
     return returned_data;
   }
 
+  /**
+   * Perform an Astarte API request
+   * 
+   * @param device_id The device ID, as returned from `getDevices()`
+   * @param api_interface The actual API path for the request
+   * @param method GET/POST/etc.
+   * @param value Optional. Can be an empty record if no data accompanies this request
+   * @returns 
+   * 
+   * @throws {UnknownResponseError} If we somehow failed to parse a response from the Astarte service
+   * @throws {TokenExpiredError} If all avenues for fetching a new ID token have expired
+   * @throws {NetworkServiceError} If a temporary network issue prevented us from reaching the Astarte service
+   */
   public async doRequest(device_id: string, api_interface: string, method: AstarteRequestMethod, value: Record<string, unknown>) {
     return await this._doRequest(device_id, api_interface, method, value, false);
   }
 
+  /**
+   * Retrieve the list of devices that the current user's account has access to
+   * @returns {string[]} A list of device ID strings
+   */
   public getDevices() {
     return this.devices!;
   }
 
-  async init() {
+  /**
+   * Initialize the connection to the Astarte service
+   * 
+   * @throws {UnknownResponseError} If we somehow failed to parse a response from the Astarte service
+   * @throws {TokenExpiredError} If all avenues for fetching a new ID token have expired
+   * @throws {NetworkServiceError} If a temporary network issue prevented us from reaching the Astarte service
+   */
+  public async init() {
     let persisted_auth_data = await this.object_store.getTokenData();
     const auth_cfg_hash = this.getAuthConfigHash();
     if (!persisted_auth_data || (persisted_auth_data && (auth_cfg_hash !== persisted_auth_data.hashed_auth_cfg))) {

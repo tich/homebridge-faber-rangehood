@@ -5,6 +5,13 @@ import zod from 'zod';
 import { OPENID_AUTH_URL, OPENID_CLIENT_ID, OPENID_TOKEN_ENDPOINT, OPENID_TOKEN_EXTRA_PARAMETERS } from './constants.js';
 import { TokenExpiredError, UnknownResponseError } from '../lib/errors.js';
 
+/**
+ * A class that's in charge of maintaining a valid OAuth/OpenID ID token
+ * 
+ * Note that this class doesn't actively monitor the validity of the ID token.
+ * It relies on the owner to notice that the ID token isn't working anymore.
+ * The owner would then invoke `refreshToken` to tell this class to fetch a new one.
+ */
 export class OpenIDSession {
   private emitter: EventEmitter = new EventEmitter();
 
@@ -22,14 +29,28 @@ export class OpenIDSession {
     this.request.defaults.headers.post['Content-Type'] = 'application/x-www-form-urlencoded';
   }
 
+  /**
+   * Force-set the ID token (if known)
+   * @param token An OAuth/OpenID ID token (A JWT token)
+   */
   setIdToken(token: string) {
     this.id_token = token;
   }
 
+  /**
+   * Set the refresh token
+   * @param token An OAuth/OpenID refresh token (A JWT token)
+   */
   setRefreshToken(token: string) {
     this.refresh_token = token;
   }
 
+  /**
+   * Mark the ID token as invalid, and attempt to fetch a new one
+   * 
+   * @throws {UnknownResponseError} If we somehow failed to parse a response from the authorization service
+   * @throws {TokenExpiredError} If all avenues for fetching a new ID token have expired
+   */
   async refreshToken() {
     this.log.info('Refreshing OpenID token');
     this.id_token = '';
@@ -41,14 +62,28 @@ export class OpenIDSession {
     this.emitTokenChanged(this.id_token!, this.refresh_token!);
   }
 
+  /**
+   * Get the ID token
+   * @returns The OAuth/OpenID ID token (in JWT format)
+   */
   getIdToken() {
     return this.id_token!;
   }
 
+  /**
+   * Check the validity of the ID token.
+   * Note that this does not check the expiration status of the ID token,
+   * so this function is mostly checking if the ID token is known.
+   * @returns True if the ID token is valid
+   */
   isValid() {
     return !!this.id_token;
   }
 
+  /**
+   * Register a callback for when the ID and/or refresh token changed
+   * @param handler A callback function
+   */
   onTokenChanged(handler: (id_token: string, refresh_token: string) => void) {
     this.emitter.on('tokenChanged', handler);
   }
