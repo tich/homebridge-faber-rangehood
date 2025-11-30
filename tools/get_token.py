@@ -98,10 +98,64 @@ class SchemeHandlerMacOS:
         subprocess.run(["/System/Library/Frameworks/CoreServices.framework/Versions/Current/Frameworks/LaunchServices.framework/Versions/Current/Support/lsregister", self._script_path], check=True)
         subprocess.run(["open", self._script_path])
         return self
-    
+
     def __exit__(self, exc_type, exc_value, exc_traceback):
         print(f"Removing scheme handler at {self._script_path}")
         shutil.rmtree(self._script_path)
+
+class SchemeHandlerLinux:
+    def __init__(self, scheme_name: str, openid_config: OpenIDConfig):
+        self._scheme_name = scheme_name
+        self._openid_config = openid_config
+        self._script_name = "FaberRedirectHandler.desktop"
+        self._script_location = os.path.expanduser("~/.local/share/applications")
+        self._script_path = f"{self._script_location}/{self._script_name}"
+
+    def __enter__(self):
+        print(f"Installing scheme handler at {self._script_path}")
+        local_redirect_uri_escaped = self._openid_config.local_redirect_uri.replace("/", "\\\\/")
+        DESKTOP_SCRIPT_LINES = [
+            "[Desktop Entry]",
+            "Name=FaberRedirectHandler",
+            f"Exec=bash -c \"echo %u | sed 's/^.\\\\{{{len(self._openid_config.redirect_uri_for_request)}\\\\}}/{local_redirect_uri_escaped}/' | xargs curl --silent --output /dev/null\"",
+            "Type=Application",
+            "Terminal=false",
+            f"MimeType=x-scheme-handler/{self._scheme_name};"
+        ]
+
+        # Remove the desktop file if it already exists
+        if os.path.exists(self._script_path):
+            os.remove(self._script_path)
+
+        os.makedirs(self._script_location, exist_ok=True)
+
+        with open(self._script_path, 'w') as script:
+            script.write("\n".join(DESKTOP_SCRIPT_LINES))
+
+        # Register the desktop file as a scheme handler in XDG
+        subprocess.run(["xdg-mime", "default", self._script_name, f"x-scheme-handler/{self._scheme_name}"], check=True)
+        # Refresh the database
+        subprocess.run(["update-desktop-database", self._script_location], check=True)
+
+        return self
+
+    def __exit__(self, exc_type, exc_value, exc_traceback):
+        print(f"Removing scheme handler at {self._script_path}")
+        # Remove the desktop file
+        os.remove(self._script_path)
+        # Remove the entry from mimeapps.list
+        mimeapps_file = os.path.expanduser("~/.config/mimeapps.list")
+        if not os.path.exists(mimeapps_file):
+            print("Warning: Failed to unregister the scheme handler")
+            return
+        with open(mimeapps_file, 'r+', encoding="utf-8") as mimeapps:
+            lines = mimeapps.readlines()
+            lines = [line for line in lines if self._script_name not in line]
+            mimeapps.seek(0)
+            mimeapps.writelines(lines)
+            mimeapps.truncate()
+        # Refresh the database
+        subprocess.run(["update-desktop-database", self._script_location], check=True)
 
 def _open_authorization_endpoint(openid_config: OpenIDConfig, state: str, pkce_secret: oidc.pkce.PKCESecret, nonce: str):
     """Open a web browser to the authorization URL. This allows the user to sign in securely"""
@@ -125,8 +179,7 @@ def _start_authorization_code_flow(state: State, pkce_secret: oidc.pkce.PKCESecr
     if platform.system() == "Darwin":
         scheme_handler = SchemeHandlerMacOS(scheme_name, state.openid_config)
     elif platform.system() == "Linux":
-        # TODO
-        raise RuntimeError("Unsupported OS: Linux")
+        scheme_handler = SchemeHandlerLinux(scheme_name, state.openid_config)
     elif platform.system() == "Windows":
         # TODO
         raise RuntimeError("Unsupported OS: Windows")

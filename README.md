@@ -5,7 +5,7 @@
 </span>
 
 > [!IMPORTANT]
-> There is no support for retrieving a refresh token on Windows or Linux yet. The `get_token.py` script only supports macOS for now. Contributions are very welcome!
+> There is no support for retrieving a refresh token on Windows yet. The `get_token.py` script only supports macOS and Linux for now. Contributions are very welcome!
 
 # Overview
 
@@ -26,15 +26,14 @@ In order to obtain both of those pieces of information, you'll need to run the `
 3. In your favorite terminal, run the script under `tools/get_token.py`
 4. This should open up your web browser to the Franke/Faber login page
 5. Login using your regular credentials
-6. Your web browser might ask you to allow redirecting to `FaberRedirectHandler.app`. This is a custom app that's dynamically created by the script itself. Click "Allow"
-7. Once you see a new webpage that says you're logged in, you can close both of these tabs in your browser
-8. Switch back to your terminal
-9. The script should've printed out a refresh token, and a list of the devices associated with your account
+6. Your web browser might ask you to allow redirecting to `FaberRedirectHandler.app` (or allow opening a link in an external handler). This is a custom handler that's dynamically created by the script itself. Click "Allow"
+7. Switch back to your terminal
+8. The script should've printed out a refresh token, and a list of the devices associated with your account
 
 # TODO
 
 - Ensure transient network errors are properly handled and recovered from (perhaps exponential backoffs using the axios-retry module)
 - Properly distinguish between a network error and a token expiration in OpenIDSession
 - Enforce no-throw somehow, or convert all exceptions to errors (using the neverthrow module)
-- Implement scheme handlers for Linux and Windows in get_token.py
+- Implement scheme handler for Windows in get_token.py
 - Implement filter maintenance reminders
