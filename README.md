@@ -22,13 +22,14 @@ In order to obtain both of those pieces of information, you'll need to run the `
 ## Running get_token.py
 
 1. Clone this repository (or download it from github)
-2. In your favorite terminal, run the script under `tools/get_token.py`
-3. This should open up your web browser to the Franke/Faber login page
-4. Login using your regular credentials
-5. Your web browser might ask you to allow redirecting to `FaberRedirectHandler.app`. This is a custom app that's dynamically created by the script itself. Click "Allow"
-6. Once you see a new webpage that says you're logged in, you can close both of these tabs in your browser
-7. Switch back to your terminal
-8. The script should've printed out a refresh token, and a list of the devices associated with your account
+2. Install the `oidc-client` [Python module](https://pypi.org/project/oidc-client/) (e.g. `pip3 install oidc-client`)
+3. In your favorite terminal, run the script under `tools/get_token.py`
+4. This should open up your web browser to the Franke/Faber login page
+5. Login using your regular credentials
+6. Your web browser might ask you to allow redirecting to `FaberRedirectHandler.app`. This is a custom app that's dynamically created by the script itself. Click "Allow"
+7. Once you see a new webpage that says you're logged in, you can close both of these tabs in your browser
+8. Switch back to your terminal
+9. The script should've printed out a refresh token, and a list of the devices associated with your account
 
 # TODO
 
