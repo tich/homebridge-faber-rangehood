@@ -8,6 +8,11 @@
     "required": ["auth_mode"],
     "additionalProperties": false,
     "properties": {
+      "name": {
+        "title": "Name",
+        "type": "string",
+        "default": "Faber Range Hood"
+      },
       "auth_mode": {
         "title": "Auth Mode",
         "type": "string",
@@ -33,17 +38,18 @@
         "type": "array",
         "items": {
           "type": "object",
+          "required": ["id"],
           "properties": {
             "name": {
-              "title": "Device Name",
+              "title": "Device Name (Optional)",
               "type": "string",
-              "default": ""
+              "default": "",
+              "placeholder": ""
             },
             "id": {
               "title": "Device ID",
               "type": "string",
-              "placeholder": "PINb12jghtk23D9WEoweif",
-              "required": true
+              "placeholder": "PINb12jghtk23D9WEoweif"
             }
           }
         }

@@ -2,7 +2,7 @@
   "name": "homebridge-faber-range-hood",
   "displayName": "Faber Range Hoods",
   "type": "module",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "description": "A Homebridge plugin for controlling Faber (Franke) range hoods.",
   "author": "tich",
   "license": "Apache-2.0",
