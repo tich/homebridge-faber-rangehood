@@ -185,7 +185,7 @@ export class RangeHoodDevice extends BaseDevice {
 
   private async sendControlRequest(api_interface: string, data: Record<string, unknown>) {
     try {
-      this.platform.log.info('Sending:', JSON.stringify(data));
+      this.platform.log.debug('Sending:', JSON.stringify(data));
       await this.platform.astarte.doRequest(
         this.device_info.id,
         ASTARTE_INTERFACE_HOOD_CONTROL + api_interface,
@@ -206,11 +206,11 @@ export class RangeHoodDevice extends BaseDevice {
 
   async setLightOn(value: CharacteristicValue) {
     const isOn = value as boolean;
-    this.platform.log.info('Turning light', isOn ? 'On': 'Off');
+    this.platform.log.debug('Turning light', isOn ? 'On': 'Off');
     const configuredBrightness = this.light_service.getCharacteristic(this.platform.Characteristic.Brightness).value! as number;
-    this.platform.log.info('Configured brightness:', configuredBrightness);
+    this.platform.log.debug('Configured brightness:', configuredBrightness);
     const intensityFromBrightness = mapRange(configuredBrightness, 0, 100, 0, this.max_light_intensity);
-    this.platform.log.info('Intensity from brightness:', intensityFromBrightness);
+    this.platform.log.debug('Intensity from brightness:', intensityFromBrightness);
     const post_data = {
       data: isOn ? intensityFromBrightness ? intensityFromBrightness : 1 : 0,
     };
@@ -219,9 +219,9 @@ export class RangeHoodDevice extends BaseDevice {
 
   async setLightBrightness(value: CharacteristicValue) {
     const brightness = value as number;
-    this.platform.log.info('Setting light brightness to', brightness);
+    this.platform.log.debug('Setting light brightness to', brightness);
     const intensityFromBrightness = mapRange(brightness, 0, 100, 0, this.max_light_intensity);
-    this.platform.log.info('Intensity from brightness:', intensityFromBrightness);
+    this.platform.log.debug('Intensity from brightness:', intensityFromBrightness);
     const post_data = {
       data: intensityFromBrightness,
     };
@@ -230,9 +230,9 @@ export class RangeHoodDevice extends BaseDevice {
 
   async setColorTemperature(value: CharacteristicValue) {
     const temperature = value as number;
-    this.platform.log.info('Setting color temperature to', temperature);
+    this.platform.log.debug('Setting color temperature to', temperature);
     const intensityFromTemperature = Math.round(mapRange(temperature, 140, 500, 0, this.max_color_temperature_settings));
-    this.platform.log.info('Intensity from temperature:', intensityFromTemperature);
+    this.platform.log.debug('Intensity from temperature:', intensityFromTemperature);
     const post_data = {
       data: intensityFromTemperature,
     };
@@ -241,11 +241,11 @@ export class RangeHoodDevice extends BaseDevice {
 
   async setFanActive(value: CharacteristicValue) {
     const isOn = value as number === this.platform.Characteristic.Active.ACTIVE;
-    this.platform.log.info('Turning fan', isOn ? 'On': 'Off');
+    this.platform.log.debug('Turning fan', isOn ? 'On': 'Off');
     const configuredSpeed = this.fan_service.getCharacteristic(this.platform.Characteristic.RotationSpeed).value! as number;
-    this.platform.log.info('Configured speed:', configuredSpeed);
+    this.platform.log.debug('Configured speed:', configuredSpeed);
     const intensityFromSpeed = Math.round(mapRange(configuredSpeed, 0, 100, 0, this.max_fan_speed));
-    this.platform.log.info('Intensity from speed:', intensityFromSpeed);
+    this.platform.log.debug('Intensity from speed:', intensityFromSpeed);
     const post_data = {
       data: isOn ? intensityFromSpeed ? intensityFromSpeed : 1 : 0,
     };
@@ -254,9 +254,9 @@ export class RangeHoodDevice extends BaseDevice {
 
   async setFanSpeed(value: CharacteristicValue) {
     const speed = value as number;
-    this.platform.log.info('Setting fan speed to', speed);
+    this.platform.log.debug('Setting fan speed to', speed);
     const intensityFromSpeed = Math.round(mapRange(speed, 0, 100, 0, this.max_fan_speed));
-    this.platform.log.info('Intensity from speed:', intensityFromSpeed);
+    this.platform.log.debug('Intensity from speed:', intensityFromSpeed);
     const post_data = {
       data: intensityFromSpeed,
     };
