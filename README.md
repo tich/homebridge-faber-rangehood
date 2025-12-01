@@ -4,9 +4,6 @@
 
 </span>
 
-> [!IMPORTANT]
-> There is no support for retrieving a refresh token on Windows yet. The `get_token.py` script only supports macOS and Linux for now. Contributions are very welcome!
-
 # Overview
 
 This plugin provides Homebridge support for Faber range hoods. This works for hoods that are controllable using the Faber Cloud App.
@@ -30,10 +27,13 @@ In order to obtain both of those pieces of information, you'll need to run the `
 7. Switch back to your terminal
 8. The script should've printed out a refresh token, and a list of the devices associated with your account
 
+### Troubleshooting get_token.py
+
+- If you get an error that looks like `urlopen error [SSL: CERTIFICATE_VERIFY_FAILED]`, then try installing the `pip-system-certs` Python package (e.g. `pip3 install pip-system-certs`)
+
 # TODO
 
 - Ensure transient network errors are properly handled and recovered from (perhaps exponential backoffs using the axios-retry module)
 - Properly distinguish between a network error and a token expiration in OpenIDSession
 - Enforce no-throw somehow, or convert all exceptions to errors (using the neverthrow module)
-- Implement scheme handler for Windows in get_token.py
 - Implement filter maintenance reminders

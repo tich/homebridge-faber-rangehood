@@ -15,6 +15,13 @@ import shutil
 import subprocess
 import time
 
+try:
+    import winreg
+except ModuleNotFoundError:
+    # This is only needed on Windows and will fail to import
+    # on any other OS
+    pass
+
 @dataclass
 class OpenIDToken:
     token_type: str = None
@@ -157,6 +164,51 @@ class SchemeHandlerLinux:
         # Refresh the database
         subprocess.run(["update-desktop-database", self._script_location], check=True)
 
+class SchemeHandlerWindows:
+    def __init__(self, scheme_name: str, openid_config: OpenIDConfig):
+        self._scheme_name = scheme_name
+        self._openid_config = openid_config
+
+    def _key_exists(self, parent, key):
+        try:
+            with winreg.OpenKey(parent, key):
+                pass
+        except OSError:
+            return False
+        return True
+
+    def _delete_key_tree(self, parent, key):
+        with winreg.OpenKey(parent, key) as key_obj:
+            while True:
+                try:
+                    sub_key = winreg.EnumKey(key_obj, 0)
+                except OSError:
+                    # No more subkeys
+                    break
+                self._delete_key_tree(key_obj, sub_key)
+        winreg.DeleteKey(parent, key)
+
+    def __enter__(self):
+        print(f"Installing scheme handler")
+
+        protocol_command = f"powershell.exe -Command \"Invoke-WebRequest -Uri $('{self._openid_config.local_redirect_uri}/' + '%1'.Substring({len(self._openid_config.redirect_uri_for_request)}))\""
+
+        if self._key_exists(winreg.HKEY_CLASSES_ROOT, self._scheme_name):
+            self._delete_key_tree(winreg.HKEY_CLASSES_ROOT, self._scheme_name)
+
+        with winreg.CreateKey(winreg.HKEY_CLASSES_ROOT, self._scheme_name) as root_key:
+            winreg.SetValueEx(root_key, "", 0, winreg.REG_SZ, "URL:Faber Redirect Handler")
+            winreg.SetValueEx(root_key, "URL Protocol", 0, winreg.REG_SZ, "")
+            with winreg.CreateKey(root_key, "shell") as shell_key:
+                with winreg.CreateKey(shell_key, "open") as open_key:
+                    winreg.SetValue(open_key, "command", winreg.REG_SZ, protocol_command)
+
+        return self
+
+    def __exit__(self, exc_type, exc_value, exc_traceback):
+        print(f"Removing scheme handler")
+        self._delete_key_tree(winreg.HKEY_CLASSES_ROOT, self._scheme_name)
+
 def _open_authorization_endpoint(openid_config: OpenIDConfig, state: str, pkce_secret: oidc.pkce.PKCESecret, nonce: str):
     """Open a web browser to the authorization URL. This allows the user to sign in securely"""
     params = {
@@ -181,8 +233,7 @@ def _start_authorization_code_flow(state: State, pkce_secret: oidc.pkce.PKCESecr
     elif platform.system() == "Linux":
         scheme_handler = SchemeHandlerLinux(scheme_name, state.openid_config)
     elif platform.system() == "Windows":
-        # TODO
-        raise RuntimeError("Unsupported OS: Windows")
+        scheme_handler = SchemeHandlerWindows(scheme_name, state.openid_config)
     else:
         raise RuntimeError(f"Unsupported OS: {platform.system()}")
 
