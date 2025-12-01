@@ -5,7 +5,7 @@
   "strictValidation": true,
   "schema": {
     "type": "object",
-    "required": ["auth_mode", "device_ids"],
+    "required": ["auth_mode"],
     "additionalProperties": false,
     "properties": {
       "auth_mode": {
@@ -29,12 +29,23 @@
           "functionBody": "return model.auth_mode === 'token';"
         }
       },
-      "device_ids": {
+      "devices": {
         "type": "array",
         "items": {
-          "title": "Device ID",
-          "type": "string",
-          "placeholder": "PINb12jghtk23D9WEoweif"
+          "type": "object",
+          "properties": {
+            "name": {
+              "title": "Device Name",
+              "type": "string",
+              "default": ""
+            },
+            "id": {
+              "title": "Device ID",
+              "type": "string",
+              "placeholder": "PINb12jghtk23D9WEoweif",
+              "required": true
+            }
+          }
         }
       }
     }

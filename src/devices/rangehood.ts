@@ -36,8 +36,8 @@ export class RangeHoodDevice extends BaseDevice {
     // Get the LightBulb service if it exists, otherwise create a new LightBulb service
     this.light_service = this.accessory.getService(this.platform.Service.Lightbulb) || this.accessory.addService(this.platform.Service.Lightbulb);
 
-    // The light's default name is "<kind> Light" (so in this case "RangeHood Light")
-    this.light_service.setCharacteristic(this.platform.Characteristic.Name, this.device_info.kind + ' Light');
+    // The light's default name is "<name> Light" (e.g. "RangeHood Light")
+    this.light_service.setCharacteristic(this.platform.Characteristic.Name, this.device_info.name + ' Light');
 
     // register handlers for the light's characteristics
     this.light_service.getCharacteristic(this.platform.Characteristic.On)
@@ -49,7 +49,7 @@ export class RangeHoodDevice extends BaseDevice {
       .onSet(this.setColorTemperature.bind(this));
 
     this.fan_service = this.accessory.getService(this.platform.Service.Fanv2) || this.accessory.addService(this.platform.Service.Fanv2);
-    this.fan_service.setCharacteristic(this.platform.Characteristic.Name, this.device_info.kind + ' Fan');
+    this.fan_service.setCharacteristic(this.platform.Characteristic.Name, this.device_info.name + ' Fan');
 
     this.fan_service.getCharacteristic(this.platform.Characteristic.Active)
       .onSet(this.setFanActive.bind(this));

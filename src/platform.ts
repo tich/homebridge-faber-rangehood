@@ -6,6 +6,11 @@ import { Astarte } from './api/astarte.js';
 import { ObjectStore } from './lib/objectstore.js';
 import { DeviceFactory, INFO_VERSION } from './devices/factory.js';
 
+interface DeviceConfig {
+  name: string,
+  id: string
+}
+
 /**
  * FaberHomebridgePlatform
  * This class is the main constructor for your plugin, this is where you should
@@ -72,7 +77,10 @@ export class FaberHomebridgePlatform implements DynamicPlatformPlugin {
     // loop over the discovered devices and register each one if it has not already been registered
     for (const deviceId of devicesInAccount) {
       // Filter out the ones that are not in the config
-      if (!this.config.device_ids.includes(deviceId)) {
+      const deviceConfig: DeviceConfig | undefined = this.config.devices.find((device: DeviceConfig) => {
+        return device.id === deviceId;
+      });
+      if (!deviceConfig) {
         continue;
       }
 
@@ -93,7 +101,7 @@ export class FaberHomebridgePlatform implements DynamicPlatformPlugin {
         if (existingAccessory.context.device.info_version !== INFO_VERSION) {
           let deviceInfo = undefined;
           try {
-            deviceInfo = await DeviceFactory.getDeviceInfo(this.log, this.astarte, deviceId);
+            deviceInfo = await DeviceFactory.getDeviceInfo(this.log, this.astarte, deviceId, deviceConfig.name);
           } catch(error) {
             this.log.error('Failed to get device info for device ID', deviceId, 'Skipping it');
             continue;
@@ -102,7 +110,6 @@ export class FaberHomebridgePlatform implements DynamicPlatformPlugin {
         }
 
         // create the accessory handler for the restored accessory
-        // Accessory kind is stored in accessory.context.device
         DeviceFactory.constructDevice(this, existingAccessory);
       } else {
         this.log.info('Matched new device ID', deviceId);
@@ -110,16 +117,16 @@ export class FaberHomebridgePlatform implements DynamicPlatformPlugin {
         // the accessory does not yet exist, so we need to create it
         let deviceInfo = undefined;
         try {
-          deviceInfo = await DeviceFactory.getDeviceInfo(this.log, this.astarte, deviceId);
+          deviceInfo = await DeviceFactory.getDeviceInfo(this.log, this.astarte, deviceId, deviceConfig.name);
         } catch(error) {
           this.log.error('Failed to get device info for device ID', deviceId, 'Skipping it');
           continue;
         }
 
-        this.log.info('Adding new accessory:', deviceInfo!.kind);
+        this.log.info('Adding new accessory:', deviceInfo!.name);
 
         // create a new accessory
-        const accessory = new this.api.platformAccessory(deviceInfo!.kind, uuid);
+        const accessory = new this.api.platformAccessory(deviceInfo!.name, uuid);
 
         // store a copy of the device info in the accessory context
         accessory.context.device = deviceInfo!;
