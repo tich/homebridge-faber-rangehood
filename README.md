@@ -34,6 +34,5 @@ In order to obtain both of those pieces of information, you'll need to run the `
 # TODO
 
 - Ensure transient network errors are properly handled and recovered from (perhaps exponential backoffs using the axios-retry module)
-- Properly distinguish between a network error and a token expiration in OpenIDSession
 - Enforce no-throw somehow, or convert all exceptions to errors (using the neverthrow module)
 - Implement filter maintenance reminders

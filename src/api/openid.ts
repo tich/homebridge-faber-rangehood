@@ -3,7 +3,7 @@ import { EventEmitter } from 'node:events';
 import axios, { AxiosInstance } from 'axios';
 import zod from 'zod';
 import { OPENID_AUTH_URL, OPENID_CLIENT_ID, OPENID_TOKEN_ENDPOINT, OPENID_TOKEN_EXTRA_PARAMETERS } from './constants.js';
-import { TokenExpiredError, UnknownResponseError } from '../lib/errors.js';
+import { NetworkServiceError, TokenExpiredError, UnknownResponseError } from '../lib/errors.js';
 
 /**
  * A class that's in charge of maintaining a valid OAuth/OpenID ID token
@@ -49,6 +49,7 @@ export class OpenIDSession {
    * Mark the ID token as invalid, and attempt to fetch a new one
    * 
    * @throws {UnknownResponseError} If we somehow failed to parse a response from the authorization service
+   * @throws {NetworkServiceError} If we encounter a transient network error (e.g. a network hiccup)
    * @throws {TokenExpiredError} If all avenues for fetching a new ID token have expired
    */
   async refreshToken() {
@@ -113,9 +114,13 @@ export class OpenIDSession {
         }
       })
       .catch((error) => {
-        this.log.error('Failed to refresh the OpenID token:', error);
-        this.refresh_token = '';
-        throw new TokenExpiredError;
+        if (error.status === 400) {
+          this.refresh_token = '';
+          throw new TokenExpiredError;
+        } else {
+          this.log.error('Failed to refresh the OpenID token:', error);
+          throw new NetworkServiceError;
+        }
       });
   }
 
