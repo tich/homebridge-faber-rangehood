@@ -184,19 +184,19 @@ Response:
 }
 ```
 
-# Device Type
-
-> TODO: capture the response for the bare interface, not the "/deviceType" path
-
+# Device Info
 
 > I'm not sure what information this interface is getting us
 
-Request: `GET https://api-astarte.cloud.faberspa.com/appengine/v1/faber/devices/{device_id}/interfaces/com.faberspa.connectedhood.DeviceInfo/deviceType`
+Request: `GET https://api-astarte.cloud.faberspa.com/appengine/v1/faber/devices/{device_id}/interfaces/com.faberspa.connectedhood.DeviceInfo`
 
 Response:
 ```
 {
-    "data": "FAIR"
+    "data": {
+        "currentIPAddress": "<device local ip (e.g. 192.168.1.67)>",
+        "deviceType": "FAIR"
+    }
 }
 ```
 

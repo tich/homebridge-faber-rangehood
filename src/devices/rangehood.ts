@@ -15,11 +15,16 @@ import { mapRange } from '../lib/utils.js';
 export class RangeHoodDevice extends BaseDevice {
   private fan_service: Service;
   private light_service: Service;
+  private carbon_filter_service: Service;
+  private grease_filter_service: Service;
+
   private readonly refresh_interval_ms = 3 * 1000;
   private readonly max_fan_speed: number;
   private readonly max_light_intensity: number;
   private readonly max_color_temperature_settings: number;
-  
+  private readonly max_carbon_filter_hours: number;
+  private readonly max_grease_filter_hours: number;
+
   constructor(
     platform: FaberHomebridgePlatform,
     accessory: PlatformAccessory,
@@ -27,11 +32,12 @@ export class RangeHoodDevice extends BaseDevice {
     super(platform, accessory);
 
     // TODO Adaptive Lighting support? https://github.com/homebridge-plugins/homebridge-meross/blob/latest/lib/device/light-cct.js#L97
-    // TODO add filter maintenance services (https://developers.homebridge.io/#/service/FilterMaintenance)
-
+    
     this.max_fan_speed = this.device_info.features.motor.maxFanSpeed;
     this.max_light_intensity = this.device_info.features.features.lights.channels[1].maxIntensity;
     this.max_color_temperature_settings = this.device_info.features.features.lights.channels[2].maxIntensity;
+    this.max_carbon_filter_hours = this.device_info.features.features.filters.fc.replacementHours;
+    this.max_grease_filter_hours = this.device_info.features.features.filters.fg.replacementHours;
 
     // Get the LightBulb service if it exists, otherwise create a new LightBulb service
     this.light_service = this.accessory.getService(this.platform.Service.Lightbulb) || this.accessory.addService(this.platform.Service.Lightbulb);
@@ -57,6 +63,26 @@ export class RangeHoodDevice extends BaseDevice {
       .onSet(this.setFanSpeed.bind(this))
       .setProps({ minStep: 100 / this.max_fan_speed });
 
+    let carbon_filter_service = this.accessory.getServiceById(this.platform.Service.FilterMaintenance, 'Carbon');
+    if (!carbon_filter_service) {
+      carbon_filter_service = new this.platform.Service.FilterMaintenance(this.device_info.name + ' Carbon Filter', 'Carbon');
+      carbon_filter_service = this.accessory.addService(carbon_filter_service);
+    }
+    this.carbon_filter_service = <Service>carbon_filter_service;
+
+    this.carbon_filter_service.getCharacteristic(this.platform.Characteristic.ResetFilterIndication)
+      .onSet(this.resetCarbonFilter.bind(this));
+
+    let grease_filter_service = this.accessory.getServiceById(this.platform.Service.FilterMaintenance, 'Grease');
+    if (!grease_filter_service) {
+      grease_filter_service = new this.platform.Service.FilterMaintenance(this.device_info.name + ' Grease Filter', 'Grease');
+      grease_filter_service = this.accessory.addService(grease_filter_service);
+    }
+    this.grease_filter_service = <Service>grease_filter_service;
+
+    this.grease_filter_service.getCharacteristic(this.platform.Characteristic.ResetFilterIndication)
+      .onSet(this.resetGreaseFilter.bind(this));
+
     setTimeout(() => this.updateHoodStatus(), this.refresh_interval_ms);
   }
 
@@ -68,6 +94,12 @@ export class RangeHoodDevice extends BaseDevice {
   
     this.fan_service.updateCharacteristic(this.platform.Characteristic.Active, new this.platform.api.hap.HapStatusError(hapStatus));
     this.fan_service.updateCharacteristic(this.platform.Characteristic.RotationSpeed, new this.platform.api.hap.HapStatusError(hapStatus));
+  
+    this.carbon_filter_service.updateCharacteristic(this.platform.Characteristic.FilterChangeIndication, new this.platform.api.hap.HapStatusError(hapStatus));
+    this.carbon_filter_service.updateCharacteristic(this.platform.Characteristic.FilterLifeLevel, new this.platform.api.hap.HapStatusError(hapStatus));
+
+    this.grease_filter_service.updateCharacteristic(this.platform.Characteristic.FilterChangeIndication, new this.platform.api.hap.HapStatusError(hapStatus));
+    this.grease_filter_service.updateCharacteristic(this.platform.Characteristic.FilterLifeLevel, new this.platform.api.hap.HapStatusError(hapStatus));
   }
 
   private async updateHoodStatus() {
@@ -76,6 +108,18 @@ export class RangeHoodDevice extends BaseDevice {
         fan: zod.object({
           speed: zod.object({
             value: zod.number(),
+          }),
+        }),
+        filters: zod.object({
+          fc: zod.object({
+            hoursUntilReplacement: zod.object({
+              value: zod.number(),
+            }),
+          }),
+          fg: zod.object({
+            hoursUntilReplacement: zod.object({
+              value: zod.number(),
+            }),
           }),
         }),
         lights: zod.object({
@@ -132,6 +176,28 @@ export class RangeHoodDevice extends BaseDevice {
         mapRange(parsed_data!.data!.data.fan.speed.value, 0, this.max_fan_speed, 0, 100));
     } else {
       this.fan_service.updateCharacteristic(this.platform.Characteristic.Active, this.platform.Characteristic.Active.INACTIVE);
+    }
+
+    if (parsed_data!.data!.data.filters.fc.hoursUntilReplacement.value > 0) {
+      this.carbon_filter_service.updateCharacteristic(this.platform.Characteristic.FilterChangeIndication,
+        this.platform.Characteristic.FilterChangeIndication.FILTER_OK);
+      this.carbon_filter_service.updateCharacteristic(this.platform.Characteristic.FilterLifeLevel,
+        mapRange(parsed_data!.data!.data.filters.fc.hoursUntilReplacement.value, 0, this.max_carbon_filter_hours, 0, 100));
+    } else {
+      this.carbon_filter_service.updateCharacteristic(this.platform.Characteristic.FilterChangeIndication,
+        this.platform.Characteristic.FilterChangeIndication.CHANGE_FILTER);
+      this.carbon_filter_service.updateCharacteristic(this.platform.Characteristic.FilterLifeLevel, 0);
+    }
+
+    if (parsed_data!.data!.data.filters.fg.hoursUntilReplacement.value > 0) {
+      this.grease_filter_service.updateCharacteristic(this.platform.Characteristic.FilterChangeIndication,
+        this.platform.Characteristic.FilterChangeIndication.FILTER_OK);
+      this.grease_filter_service.updateCharacteristic(this.platform.Characteristic.FilterLifeLevel,
+        mapRange(parsed_data!.data!.data.filters.fg.hoursUntilReplacement.value, 0, this.max_grease_filter_hours, 0, 100));
+    } else {
+      this.grease_filter_service.updateCharacteristic(this.platform.Characteristic.FilterChangeIndication,
+        this.platform.Characteristic.FilterChangeIndication.CHANGE_FILTER);
+      this.grease_filter_service.updateCharacteristic(this.platform.Characteristic.FilterLifeLevel, 0);
     }
 
     setTimeout(() => this.updateHoodStatus(), this.refresh_interval_ms);
@@ -261,5 +327,21 @@ export class RangeHoodDevice extends BaseDevice {
       data: intensityFromSpeed,
     };
     await this.sendControlRequest('/fan/speed', post_data);
+  }
+
+  async resetCarbonFilter(_value: CharacteristicValue) {
+    this.platform.log.debug('Resetting carbon filter');
+    const post_data = {
+      data: true,
+    };
+    await this.sendControlRequest('/filters/fc/resetCountdown', post_data);
+  }
+
+  async resetGreaseFilter(_value: CharacteristicValue) {
+    this.platform.log.debug('Resetting grease filter');
+    const post_data = {
+      data: true,
+    };
+    await this.sendControlRequest('/filters/fg/resetCountdown', post_data);
   }
 }

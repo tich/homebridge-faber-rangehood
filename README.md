@@ -35,4 +35,3 @@ In order to obtain both of those pieces of information, you'll need to run the `
 
 - Ensure transient network errors are properly handled and recovered from (perhaps exponential backoffs using the axios-retry module)
 - Enforce no-throw somehow, or convert all exceptions to errors (using the neverthrow module)
-- Implement filter maintenance reminders
