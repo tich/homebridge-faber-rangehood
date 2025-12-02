@@ -2,8 +2,13 @@
 
 # Homebridge Plugin for Faber Range Hoods
 
-[![verified-by-homebridge](https://img.shields.io/badge/homebridge-verified-blueviolet?color=%23491F59&style=flat)](https://github.com/homebridge/homebridge/wiki/Verified-Plugins)
+</span>
 
+<span align="center">
+
+[![verified-by-homebridge](https://img.shields.io/badge/homebridge-verified-blueviolet?color=%23491F59&style=flat)](https://github.com/homebridge/homebridge/wiki/Verified-Plugins)
+[![npm](https://img.shields.io/npm/v/homebridge-faber-range-hood/latest?label=latest)](https://www.npmjs.com/package/homebridge-faber-range-hood)
+[![npm](https://img.shields.io/npm/dt/homebridge-faber-range-hood)](https://www.npmjs.com/package/homebridge-faber-range-hood)
 
 </span>
 
