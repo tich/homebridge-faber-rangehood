@@ -2,6 +2,9 @@
 
 # Homebridge Plugin for Faber Range Hoods
 
+[![verified-by-homebridge](https://img.shields.io/badge/homebridge-verified-blueviolet?color=%23491F59&style=flat)](https://github.com/homebridge/homebridge/wiki/Verified-Plugins)
+
+
 </span>
 
 # Overview
