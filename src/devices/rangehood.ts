@@ -22,6 +22,10 @@ export class RangeHoodDevice extends BaseDevice {
   private readonly max_fan_speed: number;
   private readonly max_light_intensity: number;
   private readonly max_color_temperature_settings: number;
+  // HomeKit's color temperature is in mireds (1,000,000 / Kelvin), so the coolest light has the lowest value.
+  // The hood's manual specifies a 2700K - 6500K range. Color temperature setting 0 is the coolest.
+  private readonly min_color_temperature_mireds = 154; // 6500K
+  private readonly max_color_temperature_mireds = 370; // 2700K
   private readonly max_carbon_filter_hours: number;
   private readonly max_grease_filter_hours: number;
 
@@ -51,7 +55,13 @@ export class RangeHoodDevice extends BaseDevice {
     this.light_service.getCharacteristic(this.platform.Characteristic.Brightness)
       .onSet(this.setLightBrightness.bind(this));
     this.light_service.getCharacteristic(this.platform.Characteristic.ColorTemperature)
-      .onSet(this.setColorTemperature.bind(this));
+      .onSet(this.setColorTemperature.bind(this))
+      .setProps({
+        minValue: this.min_color_temperature_mireds,
+        maxValue: this.max_color_temperature_mireds,
+        // Snap the slider to the hood's discrete color temperature settings
+        minStep: (this.max_color_temperature_mireds - this.min_color_temperature_mireds) / this.max_color_temperature_settings,
+      });
 
     this.fan_service = this.accessory.getService(this.platform.Service.Fanv2) || this.accessory.addService(this.platform.Service.Fanv2);
     this.setServiceName(this.fan_service, this.device_info.name + ' Fan');
@@ -171,7 +181,8 @@ export class RangeHoodDevice extends BaseDevice {
     }
 
     this.light_service.updateCharacteristic(this.platform.Characteristic.ColorTemperature,
-      mapRange(parsed_data!.data!.data.lights.channels[2].intensity.value, 0, this.max_color_temperature_settings, 140, 500));
+      mapRange(parsed_data!.data!.data.lights.channels[2].intensity.value, 0, this.max_color_temperature_settings,
+        this.min_color_temperature_mireds, this.max_color_temperature_mireds));
 
     if (parsed_data!.data!.data.fan.speed.value > 0) {
       this.fan_service.updateCharacteristic(this.platform.Characteristic.Active, this.platform.Characteristic.Active.ACTIVE);
@@ -317,7 +328,8 @@ export class RangeHoodDevice extends BaseDevice {
   async setColorTemperature(value: CharacteristicValue) {
     const temperature = value as number;
     this.platform.log.debug('Setting color temperature to', temperature);
-    const intensityFromTemperature = Math.round(mapRange(temperature, 140, 500, 0, this.max_color_temperature_settings));
+    const intensityFromTemperature = Math.round(mapRange(temperature,
+      this.min_color_temperature_mireds, this.max_color_temperature_mireds, 0, this.max_color_temperature_settings));
     this.platform.log.debug('Intensity from temperature:', intensityFromTemperature);
     const post_data = {
       data: intensityFromTemperature,
