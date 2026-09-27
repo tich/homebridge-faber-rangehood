@@ -17,6 +17,7 @@ export class OpenIDSession {
 
   private refresh_token?: string;
   private id_token?: string;
+  private refresh_in_flight?: Promise<void>;
   private readonly request: AxiosInstance;
 
   constructor(
@@ -53,6 +54,17 @@ export class OpenIDSession {
    * @throws {TokenExpiredError} If all avenues for fetching a new ID token have expired
    */
   async refreshToken() {
+    // Concurrent callers share a single in-flight refresh. The refresh token is rotated on every use,
+    // so parallel refreshes would race to redeem (and persist) the same refresh token.
+    if (!this.refresh_in_flight) {
+      this.refresh_in_flight = this._refreshToken().finally(() => {
+        this.refresh_in_flight = undefined;
+      });
+    }
+    await this.refresh_in_flight;
+  }
+
+  private async _refreshToken() {
     this.log.info('Refreshing OpenID token');
     this.id_token = '';
     if (!this.refresh_token) {

@@ -22,6 +22,7 @@ export class Astarte {
   private user_id?: string;
   private devices?: string[];
   private id_token?: string;
+  private refresh_in_flight?: Promise<void>;
 
   constructor(
     private readonly log: Logging,
@@ -108,7 +109,17 @@ export class Astarte {
     this.user_id = parsed_response.data.data.user_id;
   }
 
-  private async refreshToken(is_retry: boolean = false): Promise<void> {
+  private async refreshToken() {
+    // Concurrent callers (e.g. several requests that all got a 403) share a single in-flight refresh
+    if (!this.refresh_in_flight) {
+      this.refresh_in_flight = this._refreshToken().finally(() => {
+        this.refresh_in_flight = undefined;
+      });
+    }
+    await this.refresh_in_flight;
+  }
+
+  private async _refreshToken(is_retry: boolean = false): Promise<void> {
     await this.ensureOpenIdToken();
 
     await this.fetchUserId();
@@ -135,7 +146,7 @@ export class Astarte {
         // Refresh the ID token
         await this.openid_session.refreshToken();
         // Retry the call
-        return await this.refreshToken(true);
+        return await this._refreshToken(true);
       }
       this.log.error('Failed to query Astarte token:', status, (error as Error).message);
       this.id_token = undefined;
