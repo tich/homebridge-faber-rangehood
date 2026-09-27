@@ -7,3 +7,11 @@ export function mapRange(value: number, inMin: number, inMax: number, outMin: nu
 
   return result;
 }
+
+/**
+ * Serialize a value to JSON for logging, redacting anything whose key looks like a token
+ * (e.g. `id_token`, `refresh_token`, `token`), so credentials never end up in the Homebridge logs.
+ */
+export function toRedactedJSON(value: unknown) {
+  return JSON.stringify(value, (key, val) => /token/i.test(key) ? '<redacted>' : val);
+}

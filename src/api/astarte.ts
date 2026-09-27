@@ -5,6 +5,7 @@ import zod from 'zod';
 import { OpenIDSession } from './openid.js';
 import { ObjectStore } from '../lib/objectstore.js';
 import { InvalidConfigError, NetworkServiceError, UnknownResponseError } from '../lib/errors.js';
+import { toRedactedJSON } from '../lib/utils.js';
 import { ASTARTE_API_ENDPOINT, ASTARTE_API_URL, ASTARTE_AUTH_URL, ASTARTE_REALM, ASTARTE_TOKEN_ENDPOINT, ASTARTE_USER_INFO_ENDPOINT } from './constants.js';
 
 export enum AstarteRequestMethod {
@@ -103,7 +104,7 @@ export class Astarte {
 
     const parsed_response = ResponseFormat.safeParse(response.data);
     if (!parsed_response.success) {
-      this.log.error('Failed to parse the Astarte user info response:', parsed_response.error, 'Received:', JSON.stringify(response.data));
+      this.log.error('Failed to parse the Astarte user info response:', parsed_response.error, 'Received:', toRedactedJSON(response.data));
       throw new UnknownResponseError;
     }
     this.user_id = parsed_response.data.data.user_id;
@@ -155,7 +156,7 @@ export class Astarte {
 
     const parsed_response = ResponseFormat.safeParse(response.data);
     if (!parsed_response.success) {
-      this.log.error('Failed to parse the Astarte token response:', parsed_response.error, 'Received:', JSON.stringify(response.data));
+      this.log.error('Failed to parse the Astarte token response:', parsed_response.error, 'Received:', toRedactedJSON(response.data));
       throw new UnknownResponseError;
     }
     if (this.devices === undefined) {

@@ -4,6 +4,7 @@ import axios, { AxiosInstance } from 'axios';
 import zod from 'zod';
 import { OPENID_AUTH_URL, OPENID_CLIENT_ID, OPENID_TOKEN_ENDPOINT, OPENID_TOKEN_EXTRA_PARAMETERS } from './constants.js';
 import { NetworkServiceError, TokenExpiredError, UnknownResponseError } from '../lib/errors.js';
+import { toRedactedJSON } from '../lib/utils.js';
 
 /**
  * A class that's in charge of maintaining a valid OAuth/OpenID ID token
@@ -120,13 +121,15 @@ export class OpenIDSession {
         this.refresh_token = '';
         throw new TokenExpiredError;
       }
-      this.log.error('Failed to refresh the OpenID token:', error);
+      // Don't log the whole error: an AxiosError carries the request config, whose body holds the refresh token
+      this.log.error('Failed to refresh the OpenID token:',
+        axios.isAxiosError(error) ? error.status : undefined, (error as Error).message);
       throw new NetworkServiceError;
     }
 
     const parsed_response = ResponseFormat.safeParse(response.data);
     if (!parsed_response.success) {
-      this.log.error('Failed to parse the OpenID token refresh response:', parsed_response.error, 'Received:', JSON.stringify(response.data));
+      this.log.error('Failed to parse the OpenID token refresh response:', parsed_response.error, 'Received:', toRedactedJSON(response.data));
       this.refresh_token = '';
       throw new UnknownResponseError;
     }
