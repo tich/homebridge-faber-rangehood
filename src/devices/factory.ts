@@ -9,9 +9,10 @@ import { BaseDevice } from './base.js';
 
 /**
  * This helps us know when to discard device info from the accessory cache,
- * and compute it again. Bump it up whenever you make a change to the `DeviceInfo` interface
+ * and compute it again. Bump it up whenever you make a change to the `DeviceInfo` interface,
+ * or to what a device type stores in it (e.g. the features its `getDeviceFeatures` returns)
  */
-export const INFO_VERSION = 2;
+export const INFO_VERSION = 3;
 
 export interface DeviceInfo {
   info_version: number;
@@ -20,7 +21,7 @@ export interface DeviceInfo {
   id: string;
   name: string;
   features: Record<string, unknown>;
-  firmware_revision?: string;
+  firmware_revision: string;
 }
 
 interface DeviceDescriptor {

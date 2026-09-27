@@ -97,23 +97,27 @@ export class FaberHomebridgePlatform implements DynamicPlatformPlugin {
         // the accessory already exists
         this.log.info('Restoring existing accessory from cache:', existingAccessory.displayName);
 
-        // Check if the device info needs to be updated
-        if (existingAccessory.context.device.info_version !== INFO_VERSION) {
-          let deviceInfo = undefined;
-          try {
-            deviceInfo = await DeviceFactory.getDeviceInfo(this.log, this.astarte, deviceId, deviceConfig.name);
-          } catch(error) {
+        // Mark it as discovered even if refreshing its device info fails below, so a transient error doesn't remove it from HomeKit
+        discoveredUUIDs.push(uuid);
+
+        // Always refresh the device info, to pick up changes such as a firmware update or a renamed device.
+        // If that fails, fall back to the cached device info, as long as it's in the current format
+        try {
+          existingAccessory.context.device = await DeviceFactory.getDeviceInfo(this.log, this.astarte, deviceId, deviceConfig.name);
+        } catch(error) {
+          if (existingAccessory.context.device?.info_version !== INFO_VERSION) {
             this.log.error('Failed to get device info for device ID', deviceId,
               'Keeping the cached accessory, but it will not respond until Homebridge is restarted');
-            // Still mark it as discovered, so a transient error doesn't remove it from HomeKit
-            discoveredUUIDs.push(uuid);
             continue;
           }
-          existingAccessory.context.device = deviceInfo!;
+          this.log.warn('Failed to refresh the device info for device ID', deviceId, 'Using the cached device info');
         }
 
         // create the accessory handler for the restored accessory
         DeviceFactory.constructDevice(this, existingAccessory);
+
+        // Persist the refreshed device info, and any services the handler added or removed
+        this.api.updatePlatformAccessories([existingAccessory]);
       } else {
         this.log.info('Matched new device ID', deviceId);
 
@@ -139,10 +143,10 @@ export class FaberHomebridgePlatform implements DynamicPlatformPlugin {
 
         // link the accessory to our platform
         this.api.registerPlatformAccessories(PLUGIN_NAME, PLATFORM_NAME, [accessory]);
-      }
 
-      // push into discoveredCacheUUIDs
-      discoveredUUIDs.push(uuid);
+        // push into discoveredCacheUUIDs
+        discoveredUUIDs.push(uuid);
+      }
     }
 
     // Remove devices which are no longer present by removing them from Homebridge

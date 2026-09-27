@@ -12,6 +12,7 @@ import {
 import { TokenExpiredError, UnknownResponseError } from '../lib/errors.js';
 import { mapRange } from '../lib/utils.js';
 import { ChannelWriter } from '../lib/channelwriter.js';
+import { PLUGIN_VERSION } from '../settings.js';
 
 /**
  * The latest state HomeKit requested, or the hood reported, in HomeKit's units.
@@ -31,11 +32,25 @@ interface HoodState {
   };
 }
 
+/**
+ * What the hood supports, as derived from its device features. An `undefined` feature isn't supported.
+ */
+interface HoodCapabilities {
+  max_fan_speed: number;
+  max_light_intensity?: number;
+  max_color_temperature_setting?: number;
+  carbon_filter_hours?: number;
+  grease_filter_hours?: number;
+}
+
+type HoodFeatures = Awaited<ReturnType<typeof RangeHoodDevice.getDeviceFeatures>>;
+
 export class RangeHoodDevice extends BaseDevice {
-  private fan_service: Service;
-  private light_service: Service;
-  private carbon_filter_service: Service;
-  private grease_filter_service: Service;
+  private readonly capabilities: HoodCapabilities;
+  private readonly fan_service: Service;
+  private readonly light_service?: Service;
+  private readonly carbon_filter_service?: Service;
+  private readonly grease_filter_service?: Service;
 
   private readonly refresh_interval_ms = 3 * 1000;
 
@@ -51,15 +66,10 @@ export class RangeHoodDevice extends BaseDevice {
   private readonly color_temperature_writer: ChannelWriter<number>;
   private readonly fan_writer: ChannelWriter<number>;
 
-  private readonly max_fan_speed: number;
-  private readonly max_light_intensity: number;
-  private readonly max_color_temperature_settings: number;
   // HomeKit's color temperature is in mireds (1,000,000 / Kelvin), so the coolest light has the lowest value.
   // The hood's manual specifies a 2700K - 6500K range. Color temperature setting 0 is the coolest.
   private readonly min_color_temperature_mireds = 154; // 6500K
   private readonly max_color_temperature_mireds = 370; // 2700K
-  private readonly max_carbon_filter_hours: number;
-  private readonly max_grease_filter_hours: number;
 
   constructor(
     platform: FaberHomebridgePlatform,
@@ -68,32 +78,42 @@ export class RangeHoodDevice extends BaseDevice {
     super(platform, accessory);
 
     // TODO Adaptive Lighting support? https://github.com/homebridge-plugins/homebridge-meross/blob/latest/lib/device/light-cct.js#L97
-    
-    this.max_fan_speed = this.device_info.features.motor.maxFanSpeed;
-    this.max_light_intensity = this.device_info.features.features.lights.channels[1].maxIntensity;
-    this.max_color_temperature_settings = this.device_info.features.features.lights.channels[2].maxIntensity;
-    this.max_carbon_filter_hours = this.device_info.features.features.filters.fc.replacementHours;
-    this.max_grease_filter_hours = this.device_info.features.features.filters.fg.replacementHours;
 
-    // Get the LightBulb service if it exists, otherwise create a new LightBulb service
-    this.light_service = this.accessory.getService(this.platform.Service.Lightbulb) || this.accessory.addService(this.platform.Service.Lightbulb);
+    this.capabilities = RangeHoodDevice.getCapabilities(this.device_info.features);
 
-    // The light's default name is "<name> Light" (e.g. "RangeHood Light")
-    this.setServiceName(this.light_service, this.device_info.name + ' Light');
+    // Only expose what the hood supports. Services and characteristics for unsupported features are removed,
+    // in case they were created by an earlier version of the plugin that exposed everything.
+    const cached_light_service = this.accessory.getService(this.platform.Service.Lightbulb);
+    if (this.capabilities.max_light_intensity !== undefined) {
+      // Get the LightBulb service if it exists, otherwise create a new LightBulb service
+      this.light_service = cached_light_service || this.accessory.addService(this.platform.Service.Lightbulb);
 
-    // register handlers for the light's characteristics
-    this.light_service.getCharacteristic(this.platform.Characteristic.On)
-      .onSet(this.setLightOn.bind(this));
-    this.light_service.getCharacteristic(this.platform.Characteristic.Brightness)
-      .onSet(this.setLightBrightness.bind(this));
-    this.light_service.getCharacteristic(this.platform.Characteristic.ColorTemperature)
-      .onSet(this.setColorTemperature.bind(this))
-      .setProps({
-        minValue: this.min_color_temperature_mireds,
-        maxValue: this.max_color_temperature_mireds,
-        // Snap the slider to the hood's discrete color temperature settings
-        minStep: (this.max_color_temperature_mireds - this.min_color_temperature_mireds) / this.max_color_temperature_settings,
-      });
+      // The light's default name is "<name> Light" (e.g. "RangeHood Light")
+      this.setServiceName(this.light_service, this.device_info.name + ' Light');
+
+      // register handlers for the light's characteristics
+      this.light_service.getCharacteristic(this.platform.Characteristic.On)
+        .onSet(this.setLightOn.bind(this));
+      this.light_service.getCharacteristic(this.platform.Characteristic.Brightness)
+        .onSet(this.setLightBrightness.bind(this));
+
+      if (this.capabilities.max_color_temperature_setting !== undefined) {
+        this.light_service.getCharacteristic(this.platform.Characteristic.ColorTemperature)
+          .onSet(this.setColorTemperature.bind(this))
+          .setProps({
+            minValue: this.min_color_temperature_mireds,
+            maxValue: this.max_color_temperature_mireds,
+            // Snap the slider to the hood's discrete color temperature settings
+            minStep: (this.max_color_temperature_mireds - this.min_color_temperature_mireds) / this.capabilities.max_color_temperature_setting,
+          });
+      } else if (this.light_service.testCharacteristic(this.platform.Characteristic.ColorTemperature)) {
+        this.platform.log.info('Removing the unsupported light color temperature from', this.device_info.name);
+        this.light_service.removeCharacteristic(this.light_service.getCharacteristic(this.platform.Characteristic.ColorTemperature));
+      }
+    } else if (cached_light_service) {
+      this.platform.log.info('Removing the unsupported light from', this.device_info.name);
+      this.accessory.removeService(cached_light_service);
+    }
 
     this.fan_service = this.accessory.getService(this.platform.Service.Fanv2) || this.accessory.addService(this.platform.Service.Fanv2);
     this.setServiceName(this.fan_service, this.device_info.name + ' Fan');
@@ -102,42 +122,32 @@ export class RangeHoodDevice extends BaseDevice {
       .onSet(this.setFanActive.bind(this));
     this.fan_service.getCharacteristic(this.platform.Characteristic.RotationSpeed)
       .onSet(this.setFanSpeed.bind(this))
-      .setProps({ minStep: 100 / this.max_fan_speed });
+      .setProps({ minStep: 100 / this.capabilities.max_fan_speed });
 
-    let carbon_filter_service = this.accessory.getServiceById(this.platform.Service.FilterMaintenance, 'Carbon');
-    if (!carbon_filter_service) {
-      carbon_filter_service = new this.platform.Service.FilterMaintenance(this.device_info.name + ' Carbon Filter', 'Carbon');
-      carbon_filter_service = this.accessory.addService(carbon_filter_service);
-    }
-    this.carbon_filter_service = <Service>carbon_filter_service;
-    this.setServiceName(this.carbon_filter_service, this.device_info.name + ' Carbon Filter');
-
-    this.carbon_filter_service.getCharacteristic(this.platform.Characteristic.ResetFilterIndication)
-      .onSet(this.resetCarbonFilter.bind(this));
-
-    let grease_filter_service = this.accessory.getServiceById(this.platform.Service.FilterMaintenance, 'Grease');
-    if (!grease_filter_service) {
-      grease_filter_service = new this.platform.Service.FilterMaintenance(this.device_info.name + ' Grease Filter', 'Grease');
-      grease_filter_service = this.accessory.addService(grease_filter_service);
-    }
-    this.grease_filter_service = <Service>grease_filter_service;
-    this.setServiceName(this.grease_filter_service, this.device_info.name + ' Grease Filter');
-
-    this.grease_filter_service.getCharacteristic(this.platform.Characteristic.ResetFilterIndication)
-      .onSet(this.resetGreaseFilter.bind(this));
+    this.carbon_filter_service = this.setUpFilterService('Carbon', ' Carbon Filter',
+      this.capabilities.carbon_filter_hours, this.resetCarbonFilter.bind(this));
+    this.grease_filter_service = this.setUpFilterService('Grease', ' Grease Filter',
+      this.capabilities.grease_filter_hours, this.resetGreaseFilter.bind(this));
 
     // Start from the last known state, as restored from the accessory cache
     this.state = {
       light: {
-        on: this.light_service.getCharacteristic(this.platform.Characteristic.On).value as boolean,
-        brightness: this.light_service.getCharacteristic(this.platform.Characteristic.Brightness).value as number,
-        color_temperature: this.light_service.getCharacteristic(this.platform.Characteristic.ColorTemperature).value as number,
+        on: false,
+        brightness: 0,
+        color_temperature: this.min_color_temperature_mireds,
       },
       fan: {
         active: this.fan_service.getCharacteristic(this.platform.Characteristic.Active).value === this.platform.Characteristic.Active.ACTIVE,
         speed: this.fan_service.getCharacteristic(this.platform.Characteristic.RotationSpeed).value as number,
       },
     };
+    if (this.light_service) {
+      this.state.light.on = this.light_service.getCharacteristic(this.platform.Characteristic.On).value as boolean;
+      this.state.light.brightness = this.light_service.getCharacteristic(this.platform.Characteristic.Brightness).value as number;
+      if (this.capabilities.max_color_temperature_setting !== undefined) {
+        this.state.light.color_temperature = this.light_service.getCharacteristic(this.platform.Characteristic.ColorTemperature).value as number;
+      }
+    }
 
     this.light_writer = new ChannelWriter(
       () => this.getLightIntensity(),
@@ -150,6 +160,48 @@ export class RangeHoodDevice extends BaseDevice {
       (speed) => this.sendControlRequest('/fan/speed', { data: speed }));
 
     this.schedulePoll();
+  }
+
+  /**
+   * Work out what the hood supports from its device features.
+   * A feature the hood doesn't report, or reports with a zero maximum, is treated as unsupported.
+   */
+  private static getCapabilities(features: HoodFeatures): HoodCapabilities {
+    const positive = (value?: number) => value !== undefined && value > 0 ? value : undefined;
+    const max_light_intensity = positive(features.features.lights?.channels[1]?.maxIntensity);
+    return {
+      max_fan_speed: features.motor.maxFanSpeed,
+      max_light_intensity,
+      // Color temperature is the light's second channel, when the hood reports its tunable white feature as enabled
+      max_color_temperature_setting: max_light_intensity !== undefined && features.features.lights?.tunableWhite?.enabled
+        ? positive(features.features.lights.channels[2]?.maxIntensity)
+        : undefined,
+      carbon_filter_hours: positive(features.features.filters?.fc?.replacementHours),
+      grease_filter_hours: positive(features.features.filters?.fg?.replacementHours),
+    };
+  }
+
+  /**
+   * Get or create a filter's service if the hood has that filter, otherwise remove any cached one
+   * @returns The filter's service, or `undefined` if the hood doesn't have that filter
+   */
+  private setUpFilterService(subtype: string, name_suffix: string, replacement_hours: number | undefined,
+    onReset: (value: CharacteristicValue) => Promise<void>) {
+    const cached_service = this.accessory.getServiceById(this.platform.Service.FilterMaintenance, subtype);
+    if (replacement_hours === undefined) {
+      if (cached_service) {
+        this.platform.log.info('Removing the unsupported' + name_suffix.toLowerCase(), 'from', this.device_info.name);
+        this.accessory.removeService(cached_service);
+      }
+      return undefined;
+    }
+
+    const service = cached_service
+      || this.accessory.addService(new this.platform.Service.FilterMaintenance(this.device_info.name + name_suffix, subtype));
+    this.setServiceName(service, this.device_info.name + name_suffix);
+    service.getCharacteristic(this.platform.Characteristic.ResetFilterIndication)
+      .onSet(onReset);
+    return service;
   }
 
   /**
@@ -173,21 +225,35 @@ export class RangeHoodDevice extends BaseDevice {
 
   private propagateHapStatus(hapStatus: HAPStatus) {
     // Update all the services and characterstics with this hap status
-    this.light_service.updateCharacteristic(this.platform.Characteristic.On, new this.platform.api.hap.HapStatusError(hapStatus));
-    this.light_service.updateCharacteristic(this.platform.Characteristic.Brightness, new this.platform.api.hap.HapStatusError(hapStatus));
-    this.light_service.updateCharacteristic(this.platform.Characteristic.ColorTemperature, new this.platform.api.hap.HapStatusError(hapStatus));
-  
-    this.fan_service.updateCharacteristic(this.platform.Characteristic.Active, new this.platform.api.hap.HapStatusError(hapStatus));
-    this.fan_service.updateCharacteristic(this.platform.Characteristic.RotationSpeed, new this.platform.api.hap.HapStatusError(hapStatus));
-  
-    this.carbon_filter_service.updateCharacteristic(this.platform.Characteristic.FilterChangeIndication, new this.platform.api.hap.HapStatusError(hapStatus));
-    this.carbon_filter_service.updateCharacteristic(this.platform.Characteristic.FilterLifeLevel, new this.platform.api.hap.HapStatusError(hapStatus));
+    const error = new this.platform.api.hap.HapStatusError(hapStatus);
+    this.light_service?.updateCharacteristic(this.platform.Characteristic.On, error);
+    this.light_service?.updateCharacteristic(this.platform.Characteristic.Brightness, error);
+    if (this.capabilities.max_color_temperature_setting !== undefined) {
+      this.light_service?.updateCharacteristic(this.platform.Characteristic.ColorTemperature, error);
+    }
 
-    this.grease_filter_service.updateCharacteristic(this.platform.Characteristic.FilterChangeIndication, new this.platform.api.hap.HapStatusError(hapStatus));
-    this.grease_filter_service.updateCharacteristic(this.platform.Characteristic.FilterLifeLevel, new this.platform.api.hap.HapStatusError(hapStatus));
+    this.fan_service.updateCharacteristic(this.platform.Characteristic.Active, error);
+    this.fan_service.updateCharacteristic(this.platform.Characteristic.RotationSpeed, error);
+
+    this.carbon_filter_service?.updateCharacteristic(this.platform.Characteristic.FilterChangeIndication, error);
+    this.carbon_filter_service?.updateCharacteristic(this.platform.Characteristic.FilterLifeLevel, error);
+
+    this.grease_filter_service?.updateCharacteristic(this.platform.Characteristic.FilterChangeIndication, error);
+    this.grease_filter_service?.updateCharacteristic(this.platform.Characteristic.FilterLifeLevel, error);
   }
 
   private async updateHoodStatus() {
+    const Intensity = zod.object({
+      intensity: zod.object({
+        value: zod.number(),
+      }),
+    });
+    const HoursUntilReplacement = zod.object({
+      hoursUntilReplacement: zod.object({
+        value: zod.number(),
+      }),
+    });
+    // Everything but the fan is optional, since not every hood has every feature
     const ResponseFormat = zod.object({
       data: zod.object({
         fan: zod.object({
@@ -196,34 +262,18 @@ export class RangeHoodDevice extends BaseDevice {
           }),
         }),
         filters: zod.object({
-          fc: zod.object({
-            hoursUntilReplacement: zod.object({
-              value: zod.number(),
-            }),
-          }),
-          fg: zod.object({
-            hoursUntilReplacement: zod.object({
-              value: zod.number(),
-            }),
-          }),
-        }),
+          fc: HoursUntilReplacement.optional(),
+          fg: HoursUntilReplacement.optional(),
+        }).optional(),
         lights: zod.object({
           channels: zod.object({
-            1: zod.object({
-              intensity: zod.object({
-                value: zod.number(),
-              }),
-            }),
-            2: zod.object({
-              intensity: zod.object({
-                value: zod.number(),
-              }),
-            }),
+            1: Intensity.optional(),
+            2: Intensity.optional(),
           }),
-        }),
+        }).optional(),
       }),
     });
-  
+
     const poll_write_generation = this.write_generation;
     let parsed_data = undefined;
     try {
@@ -249,78 +299,88 @@ export class RangeHoodDevice extends BaseDevice {
       }
       return;
     }
+    const status = parsed_data!.data!.data;
 
     // Track the reported state, so the next writes start from it (e.g. after the hood's own buttons were used).
     // When the light or fan is off, keep the last brightness or speed, so turning it back on restores it.
-    const light_intensity = parsed_data!.data!.data.lights.channels[1].intensity.value;
-    this.state.light.on = light_intensity > 0;
-    if (this.state.light.on) {
-      this.state.light.brightness = Math.round(mapRange(light_intensity, 0, this.max_light_intensity, 0, 100));
+    const light_intensity = status.lights?.channels[1]?.intensity.value;
+    if (this.capabilities.max_light_intensity !== undefined && light_intensity !== undefined) {
+      this.state.light.on = light_intensity > 0;
+      if (this.state.light.on) {
+        this.state.light.brightness = Math.round(mapRange(light_intensity, 0, this.capabilities.max_light_intensity, 0, 100));
+      }
     }
-    this.state.light.color_temperature = mapRange(parsed_data!.data!.data.lights.channels[2].intensity.value, 0, this.max_color_temperature_settings,
-      this.min_color_temperature_mireds, this.max_color_temperature_mireds);
-    const fan_speed = parsed_data!.data!.data.fan.speed.value;
+    const color_temperature_setting = status.lights?.channels[2]?.intensity.value;
+    if (this.capabilities.max_color_temperature_setting !== undefined && color_temperature_setting !== undefined) {
+      this.state.light.color_temperature = mapRange(color_temperature_setting, 0, this.capabilities.max_color_temperature_setting,
+        this.min_color_temperature_mireds, this.max_color_temperature_mireds);
+    }
+    const fan_speed = status.fan.speed.value;
     this.state.fan.active = fan_speed > 0;
     if (this.state.fan.active) {
-      this.state.fan.speed = mapRange(fan_speed, 0, this.max_fan_speed, 0, 100);
+      this.state.fan.speed = mapRange(fan_speed, 0, this.capabilities.max_fan_speed, 0, 100);
     }
 
     // Brightness and speed are updated even when the light or fan is off: re-asserting the value
     // still clears any error status left behind by a failed write
-    this.light_service.updateCharacteristic(this.platform.Characteristic.On, this.state.light.on);
-    this.light_service.updateCharacteristic(this.platform.Characteristic.Brightness, this.state.light.brightness);
-    this.light_service.updateCharacteristic(this.platform.Characteristic.ColorTemperature, this.state.light.color_temperature);
+    if (this.light_service) {
+      this.light_service.updateCharacteristic(this.platform.Characteristic.On, this.state.light.on);
+      this.light_service.updateCharacteristic(this.platform.Characteristic.Brightness, this.state.light.brightness);
+      if (this.capabilities.max_color_temperature_setting !== undefined) {
+        this.light_service.updateCharacteristic(this.platform.Characteristic.ColorTemperature, this.state.light.color_temperature);
+      }
+    }
     this.fan_service.updateCharacteristic(this.platform.Characteristic.Active,
       this.state.fan.active ? this.platform.Characteristic.Active.ACTIVE : this.platform.Characteristic.Active.INACTIVE);
     this.fan_service.updateCharacteristic(this.platform.Characteristic.RotationSpeed, this.state.fan.speed);
 
-    if (parsed_data!.data!.data.filters.fc.hoursUntilReplacement.value > 0) {
-      this.carbon_filter_service.updateCharacteristic(this.platform.Characteristic.FilterChangeIndication,
-        this.platform.Characteristic.FilterChangeIndication.FILTER_OK);
-      this.carbon_filter_service.updateCharacteristic(this.platform.Characteristic.FilterLifeLevel,
-        mapRange(parsed_data!.data!.data.filters.fc.hoursUntilReplacement.value, 0, this.max_carbon_filter_hours, 0, 100));
-    } else {
-      this.carbon_filter_service.updateCharacteristic(this.platform.Characteristic.FilterChangeIndication,
-        this.platform.Characteristic.FilterChangeIndication.CHANGE_FILTER);
-      this.carbon_filter_service.updateCharacteristic(this.platform.Characteristic.FilterLifeLevel, 0);
-    }
-
-    if (parsed_data!.data!.data.filters.fg.hoursUntilReplacement.value > 0) {
-      this.grease_filter_service.updateCharacteristic(this.platform.Characteristic.FilterChangeIndication,
-        this.platform.Characteristic.FilterChangeIndication.FILTER_OK);
-      this.grease_filter_service.updateCharacteristic(this.platform.Characteristic.FilterLifeLevel,
-        mapRange(parsed_data!.data!.data.filters.fg.hoursUntilReplacement.value, 0, this.max_grease_filter_hours, 0, 100));
-    } else {
-      this.grease_filter_service.updateCharacteristic(this.platform.Characteristic.FilterChangeIndication,
-        this.platform.Characteristic.FilterChangeIndication.CHANGE_FILTER);
-      this.grease_filter_service.updateCharacteristic(this.platform.Characteristic.FilterLifeLevel, 0);
-    }
+    this.updateFilterStatus(this.carbon_filter_service, status.filters?.fc?.hoursUntilReplacement.value, this.capabilities.carbon_filter_hours);
+    this.updateFilterStatus(this.grease_filter_service, status.filters?.fg?.hoursUntilReplacement.value, this.capabilities.grease_filter_hours);
 
     this.schedulePoll();
   }
 
+  private updateFilterStatus(filter_service: Service | undefined, hours_until_replacement: number | undefined, replacement_hours?: number) {
+    if (!filter_service || hours_until_replacement === undefined || replacement_hours === undefined) {
+      return;
+    }
+    if (hours_until_replacement > 0) {
+      filter_service.updateCharacteristic(this.platform.Characteristic.FilterChangeIndication,
+        this.platform.Characteristic.FilterChangeIndication.FILTER_OK);
+      filter_service.updateCharacteristic(this.platform.Characteristic.FilterLifeLevel,
+        mapRange(hours_until_replacement, 0, replacement_hours, 0, 100));
+    } else {
+      filter_service.updateCharacteristic(this.platform.Characteristic.FilterChangeIndication,
+        this.platform.Characteristic.FilterChangeIndication.CHANGE_FILTER);
+      filter_service.updateCharacteristic(this.platform.Characteristic.FilterLifeLevel, 0);
+    }
+  }
+
   public static async getDeviceFeatures(log: Logging, astarte: Astarte, device_id: string) {
-    // TODO are any of these features optional?
+    // Everything is optional, since not every hood has every feature. See `getCapabilities`
     const FeaturesResponseFormat = zod.object({
       data: zod.object({
         filters: zod.object({
           fc: zod.object({
             replacementHours: zod.number(),
-          }),
+          }).optional(),
           fg: zod.object({
             replacementHours: zod.number(),
-          }),
-        }),
+          }).optional(),
+        }).optional(),
         lights: zod.object({
           channels: zod.object({
             1: zod.object({
               maxIntensity: zod.number(),
-            }),
+            }).optional(),
             2: zod.object({
               maxIntensity: zod.number(),
-            }),
+            }).optional(),
           }),
-        }),
+          tunableWhite: zod.object({
+            enabled: zod.boolean(),
+          }).optional(),
+        }).optional(),
       }),
     });
     const feature_data = await astarte.doRequest(device_id, ASTARTE_INTERFACE_HOOD_FEATURES, AstarteRequestMethod.GET, {});
@@ -343,6 +403,13 @@ export class RangeHoodDevice extends BaseDevice {
     }
 
     return { features: parsed_feature_data.data!.data, motor: parsed_motor_data.data!.data };
+  }
+
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  public static async getFirmwareRevision(log: Logging, astarte: Astarte, device_id: string) {
+    // The hood's firmware version isn't available from the cloud API, so report the plugin's version instead.
+    // HomeKit expects a numeric "x[.y[.z]]" version, so drop any pre-release suffix (e.g. "-beta.1")
+    return PLUGIN_VERSION.split('-')[0];
   }
 
   /**
@@ -400,17 +467,19 @@ export class RangeHoodDevice extends BaseDevice {
     return Math.max(Math.round(mapRange(percentage, 0, 100, 0, max_level)), 1);
   }
 
+  // The light and color temperature writers are only used by handlers that are registered when the hood supports them
+
   private getLightIntensity() {
     if (!this.state.light.on) {
       return 0;
     }
     // On, but the brightness can still be 0% (e.g. a new accessory, or the brightness was set to 0): use the lowest level
-    return Math.max(this.percentageToLevel(this.state.light.brightness, this.max_light_intensity), 1);
+    return Math.max(this.percentageToLevel(this.state.light.brightness, this.capabilities.max_light_intensity!), 1);
   }
 
   private getColorTemperatureSetting() {
     return Math.round(mapRange(this.state.light.color_temperature,
-      this.min_color_temperature_mireds, this.max_color_temperature_mireds, 0, this.max_color_temperature_settings));
+      this.min_color_temperature_mireds, this.max_color_temperature_mireds, 0, this.capabilities.max_color_temperature_setting!));
   }
 
   private getFanSpeed() {
@@ -418,7 +487,7 @@ export class RangeHoodDevice extends BaseDevice {
       return 0;
     }
     // Active, but the speed can still be 0% (e.g. a new accessory, or the speed was set to 0): use the lowest speed
-    return Math.max(this.percentageToLevel(this.state.fan.speed, this.max_fan_speed), 1);
+    return Math.max(this.percentageToLevel(this.state.fan.speed, this.capabilities.max_fan_speed), 1);
   }
 
   // The handlers only record what HomeKit requested, then let the channel's writer send the resulting state.
@@ -458,13 +527,15 @@ export class RangeHoodDevice extends BaseDevice {
     await this.pausePollingDuring(() => this.fan_writer.write());
   }
 
+  // The filter reset handlers are only registered when the hood has that filter
+
   async resetCarbonFilter(_value: CharacteristicValue) {
     this.platform.log.debug('Resetting carbon filter');
     const post_data = {
       data: true,
     };
     await this.sendControlRequest('/filters/fc/resetCountdown', post_data);
-    this.resetFilterStatus(this.carbon_filter_service);
+    this.resetFilterStatus(this.carbon_filter_service!);
   }
 
   async resetGreaseFilter(_value: CharacteristicValue) {
@@ -473,7 +544,7 @@ export class RangeHoodDevice extends BaseDevice {
       data: true,
     };
     await this.sendControlRequest('/filters/fg/resetCountdown', post_data);
-    this.resetFilterStatus(this.grease_filter_service);
+    this.resetFilterStatus(this.grease_filter_service!);
   }
 
   /**
