@@ -4,6 +4,8 @@ import type { DeviceInfo } from './factory.js';
 
 export class BaseDevice {
   protected readonly device_info: DeviceInfo;
+  // The services named with `setServiceName`, and their names
+  private readonly service_names = new Map<Service, string>();
 
   constructor(
     protected readonly platform: FaberHomebridgePlatform,
@@ -32,6 +34,21 @@ export class BaseDevice {
       service.addOptionalCharacteristic(this.platform.Characteristic.ConfiguredName);
     }
     if (!service.getCharacteristic(this.platform.Characteristic.ConfiguredName).value) {
+      service.updateCharacteristic(this.platform.Characteristic.ConfiguredName, name);
+    }
+    this.service_names.set(service, name);
+  }
+
+  /**
+   * Apply the device's name to the accessory and all its services, overwriting any names set in the Home app.
+   * Used when the device was renamed in the plugin config. HomeKit keeps its own copy of the accessory's name
+   * once it's paired, so the Home app may not pick up the accessory's new name, but it does pick up the services' names.
+   */
+  public applyName() {
+    this.accessory.updateDisplayName(this.device_info.name);
+    this.accessory.getService(this.platform.Service.AccessoryInformation)!
+      .updateCharacteristic(this.platform.Characteristic.Name, this.device_info.name);
+    for (const [service, name] of this.service_names) {
       service.updateCharacteristic(this.platform.Characteristic.ConfiguredName, name);
     }
   }

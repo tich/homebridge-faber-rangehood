@@ -176,6 +176,8 @@ export class FaberHomebridgePlatform implements DynamicPlatformPlugin {
     // see if an accessory with the same uuid has already been registered and restored from
     // the cached devices we stored in the `configureAccessory` method above
     const existingAccessory = this.accessories.get(uuid);
+    // The name the device had until now, to detect it being renamed in the plugin config
+    const previousName: unknown = existingAccessory?.context.device?.name;
 
     const fetchedDeviceInfo = await DeviceFactory.getDeviceInfo(this.log, this.astarte, deviceId, deviceConfig.name ?? '');
     let deviceInfo: DeviceInfo;
@@ -186,7 +188,8 @@ export class FaberHomebridgePlatform implements DynamicPlatformPlugin {
       const cachedDeviceInfo = existingAccessory ? DeviceFactory.parseCachedDeviceInfo(existingAccessory.context.device) : undefined;
       if (cachedDeviceInfo?.isOk()) {
         this.log.warn('Failed to refresh the device info for device ID', deviceId, 'Using the cached device info');
-        deviceInfo = cachedDeviceInfo.value;
+        // The device may have been renamed in the plugin config since its device info was cached
+        deviceInfo = { ...cachedDeviceInfo.value, name: deviceConfig.name || cachedDeviceInfo.value.name };
       } else if (isTransientError(error)) {
         this.log.warn(`Failed to get device info for device ID ${deviceId}. Retrying in ${retry_delay_ms / 1000} seconds`);
         setTimeout(() => this.runSafely(`setting up device ID ${deviceId}`,
@@ -212,6 +215,11 @@ export class FaberHomebridgePlatform implements DynamicPlatformPlugin {
 
     if (existingAccessory) {
       this.log.info('Restored existing accessory from cache:', existingAccessory.displayName);
+      if (previousName !== undefined && previousName !== deviceInfo.name) {
+        // Only when the name changed, so that renames done in the Home app aren't overwritten on every restart
+        this.log.info(`Renaming "${previousName}" to "${deviceInfo.name}", as set in the plugin config`);
+        device.value.applyName();
+      }
       // Persist the refreshed device info, and any services the handler added or removed
       this.api.updatePlatformAccessories([existingAccessory]);
     } else {
