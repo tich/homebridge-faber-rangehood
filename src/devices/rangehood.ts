@@ -464,6 +464,7 @@ export class RangeHoodDevice extends BaseDevice {
       data: true,
     };
     await this.sendControlRequest('/filters/fc/resetCountdown', post_data);
+    this.resetFilterStatus(this.carbon_filter_service);
   }
 
   async resetGreaseFilter(_value: CharacteristicValue) {
@@ -472,5 +473,21 @@ export class RangeHoodDevice extends BaseDevice {
       data: true,
     };
     await this.sendControlRequest('/filters/fg/resetCountdown', post_data);
+    this.resetFilterStatus(this.grease_filter_service);
+  }
+
+  /**
+   * Show a successfully reset filter as new.
+   *
+   * When HomeKit writes a characteristic like Brightness, HAP-NodeJS stores the written value once the write succeeds,
+   * so the Home app shows the new state right away. A filter reset is different: HomeKit writes the write-only
+   * ResetFilterIndication trigger, while the Home app displays FilterChangeIndication and FilterLifeLevel, which nothing
+   * writes. Without this, the Home app would keep asking for the filter to be replaced until the next poll picks up
+   * the reset countdown.
+   */
+  private resetFilterStatus(filter_service: Service) {
+    filter_service.updateCharacteristic(this.platform.Characteristic.FilterChangeIndication,
+      this.platform.Characteristic.FilterChangeIndication.FILTER_OK);
+    filter_service.updateCharacteristic(this.platform.Characteristic.FilterLifeLevel, 100);
   }
 }
