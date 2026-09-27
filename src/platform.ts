@@ -103,7 +103,10 @@ export class FaberHomebridgePlatform implements DynamicPlatformPlugin {
           try {
             deviceInfo = await DeviceFactory.getDeviceInfo(this.log, this.astarte, deviceId, deviceConfig.name);
           } catch(error) {
-            this.log.error('Failed to get device info for device ID', deviceId, 'Skipping it');
+            this.log.error('Failed to get device info for device ID', deviceId,
+              'Keeping the cached accessory, but it will not respond until Homebridge is restarted');
+            // Still mark it as discovered, so a transient error doesn't remove it from HomeKit
+            discoveredUUIDs.push(uuid);
             continue;
           }
           existingAccessory.context.device = deviceInfo!;
