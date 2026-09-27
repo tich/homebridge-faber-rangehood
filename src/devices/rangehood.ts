@@ -49,8 +49,7 @@ export class RangeHoodDevice extends BaseDevice {
     this.light_service.getCharacteristic(this.platform.Characteristic.On)
       .onSet(this.setLightOn.bind(this));
     this.light_service.getCharacteristic(this.platform.Characteristic.Brightness)
-      .onSet(this.setLightBrightness.bind(this))
-      .setProps({ minStep: 100 / this.max_light_intensity });
+      .onSet(this.setLightBrightness.bind(this));
     this.light_service.getCharacteristic(this.platform.Characteristic.ColorTemperature)
       .onSet(this.setColorTemperature.bind(this));
 
@@ -162,7 +161,7 @@ export class RangeHoodDevice extends BaseDevice {
     if (parsed_data!.data!.data.lights.channels[1].intensity.value > 0) {
       this.light_service.updateCharacteristic(this.platform.Characteristic.On, true);
       this.light_service.updateCharacteristic(this.platform.Characteristic.Brightness,
-        mapRange(parsed_data!.data!.data.lights.channels[1].intensity.value, 0, this.max_light_intensity, 0, 100));
+        Math.round(mapRange(parsed_data!.data!.data.lights.channels[1].intensity.value, 0, this.max_light_intensity, 0, 100)));
     } else {
       this.light_service.updateCharacteristic(this.platform.Characteristic.On, false);
     }
@@ -270,12 +269,24 @@ export class RangeHoodDevice extends BaseDevice {
     }
   }
 
+  /**
+   * Convert a HomeKit brightness percentage to one of the hood's discrete intensity levels.
+   * Any non-zero brightness maps to at least level 1, so a low brightness doesn't turn the light off.
+   */
+  private brightnessToIntensity(brightness: number) {
+    if (brightness <= 0) {
+      return 0;
+    }
+    const intensity = Math.round(mapRange(brightness, 0, 100, 0, this.max_light_intensity));
+    return Math.max(intensity, 1);
+  }
+
   async setLightOn(value: CharacteristicValue) {
     const isOn = value as boolean;
     this.platform.log.debug('Turning light', isOn ? 'On': 'Off');
     const configuredBrightness = this.light_service.getCharacteristic(this.platform.Characteristic.Brightness).value! as number;
     this.platform.log.debug('Configured brightness:', configuredBrightness);
-    const intensityFromBrightness = mapRange(configuredBrightness, 0, 100, 0, this.max_light_intensity);
+    const intensityFromBrightness = this.brightnessToIntensity(configuredBrightness);
     this.platform.log.debug('Intensity from brightness:', intensityFromBrightness);
     const post_data = {
       data: isOn ? intensityFromBrightness ? intensityFromBrightness : 1 : 0,
@@ -286,7 +297,7 @@ export class RangeHoodDevice extends BaseDevice {
   async setLightBrightness(value: CharacteristicValue) {
     const brightness = value as number;
     this.platform.log.debug('Setting light brightness to', brightness);
-    const intensityFromBrightness = mapRange(brightness, 0, 100, 0, this.max_light_intensity);
+    const intensityFromBrightness = this.brightnessToIntensity(brightness);
     this.platform.log.debug('Intensity from brightness:', intensityFromBrightness);
     const post_data = {
       data: intensityFromBrightness,
