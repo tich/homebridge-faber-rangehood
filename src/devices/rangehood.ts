@@ -53,6 +53,10 @@ export class RangeHoodDevice extends BaseDevice {
   private readonly grease_filter_service?: Service;
 
   private readonly refresh_interval_ms = 3 * 1000;
+  // While polls keep failing with network errors (e.g. during an internet outage), the interval between them
+  // doubles with each failure, up to this maximum. This avoids hammering the API and flooding the logs.
+  private readonly max_refresh_interval_ms = 5 * 60 * 1000;
+  private consecutive_poll_failures = 0;
 
   // Polling is paused while writes are in flight, so a poll can't overwrite a write with an outdated state
   private poll_timer?: ReturnType<typeof setTimeout>;
@@ -212,7 +216,8 @@ export class RangeHoodDevice extends BaseDevice {
     if (this.polling_stopped) {
       return;
     }
-    this.poll_timer = setTimeout(() => this.updateHoodStatus(), this.refresh_interval_ms);
+    const delay_ms = Math.min(this.refresh_interval_ms * 2 ** this.consecutive_poll_failures, this.max_refresh_interval_ms);
+    this.poll_timer = setTimeout(() => this.updateHoodStatus(), delay_ms);
   }
 
   /**
@@ -294,12 +299,21 @@ export class RangeHoodDevice extends BaseDevice {
         this.propagateHapStatus(HAPStatus.SERVICE_COMMUNICATION_FAILURE);
         this.polling_stopped = true;
       } else {
-        // This sounds like a recoverable network error. No need to stop updating
+        // This sounds like a recoverable network error. Keep polling, but back off until it recovers
+        if (this.consecutive_poll_failures === 0) {
+          this.platform.log.warn('Lost connection to', this.device_info.name + '. Retrying less often until it recovers');
+        }
+        this.consecutive_poll_failures++;
         this.schedulePoll();
       }
       return;
     }
     const status = parsed_data!.data!.data;
+
+    if (this.consecutive_poll_failures > 0) {
+      this.platform.log.info('Reconnected to', this.device_info.name);
+      this.consecutive_poll_failures = 0;
+    }
 
     // Track the reported state, so the next writes start from it (e.g. after the hood's own buttons were used).
     // When the light or fan is off, keep the last brightness or speed, so turning it back on restores it.
