@@ -168,7 +168,7 @@ export class RangeHoodDevice extends BaseDevice {
     }
 
     this.light_service.updateCharacteristic(this.platform.Characteristic.ColorTemperature,
-      mapRange(parsed_data!.data!.data.lights.channels[1].intensity.value, 0, this.max_color_temperature_settings, 140, 500));
+      mapRange(parsed_data!.data!.data.lights.channels[2].intensity.value, 0, this.max_color_temperature_settings, 140, 500));
 
     if (parsed_data!.data!.data.fan.speed.value > 0) {
       this.fan_service.updateCharacteristic(this.platform.Characteristic.Active, this.platform.Characteristic.Active.ACTIVE);
