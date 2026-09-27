@@ -55,11 +55,11 @@ export class OpenIDSession {
   async refreshToken() {
     this.log.info('Refreshing OpenID token');
     this.id_token = '';
-    if (this.refresh_token) {
-      await this.getIDTokenUsingRefreshToken();
-    } else {
+    if (!this.refresh_token) {
       this.log.error('Cannot get OpenID token because the refresh token has expired or is invalid');
+      throw new TokenExpiredError;
     }
+    await this.getIDTokenUsingRefreshToken();
     this.emitTokenChanged(this.id_token!, this.refresh_token!);
   }
 

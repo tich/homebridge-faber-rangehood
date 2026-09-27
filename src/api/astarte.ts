@@ -4,7 +4,7 @@ import MD5 from 'md5';
 import zod from 'zod';
 import { OpenIDSession } from './openid.js';
 import { ObjectStore } from '../lib/objectstore.js';
-import { InvalidConfigError, NetworkServiceError, TokenExpiredError, UnknownResponseError } from '../lib/errors.js';
+import { InvalidConfigError, NetworkServiceError, UnknownResponseError } from '../lib/errors.js';
 import { ASTARTE_API_ENDPOINT, ASTARTE_API_URL, ASTARTE_AUTH_URL, ASTARTE_REALM, ASTARTE_TOKEN_ENDPOINT, ASTARTE_USER_INFO_ENDPOINT } from './constants.js';
 
 export enum AstarteRequestMethod {
@@ -57,15 +57,25 @@ export class Astarte {
     return MD5(auth_cfg_str);
   }
 
+  /**
+   * Make sure we have an OpenID ID token, fetching a new one with the refresh token if needed.
+   * The ID token can be missing if a previous refresh attempt failed (e.g. a network hiccup).
+   *
+   * @throws {TokenExpiredError} If all avenues for fetching a new ID token have expired
+   */
+  private async ensureOpenIdToken() {
+    if (!this.openid_session.isValid()) {
+      await this.openid_session.refreshToken();
+    }
+  }
+
   private async fetchUserId(is_retry: boolean = false): Promise<void> {
     if (this.user_id !== undefined) {
       // Already done.
       return;
     }
 
-    if (!this.openid_session.isValid()) {
-      throw new TokenExpiredError;
-    }
+    await this.ensureOpenIdToken();
 
     const ResponseFormat = zod.object({
       data: zod.object({
@@ -99,9 +109,7 @@ export class Astarte {
   }
 
   private async refreshToken(is_retry: boolean = false): Promise<void> {
-    if (!this.openid_session.isValid()) {
-      throw new TokenExpiredError;
-    }
+    await this.ensureOpenIdToken();
 
     await this.fetchUserId();
 
