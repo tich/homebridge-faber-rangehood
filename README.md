@@ -38,3 +38,9 @@ In order to obtain both of those pieces of information, you'll need to run the `
 ### Troubleshooting get_token.py
 
 - If you get an error that looks like `urlopen error [SSL: CERTIFICATE_VERIFY_FAILED]`, then try installing the `pip-system-certs` Python package (e.g. `pip3 install pip-system-certs`)
+
+# Development
+
+1. Install the dependencies with `npm ci`
+2. Copy `test/config.example.json` to `test/hbConfig/config.json`, then fill in your refresh token and device ID (see [Running get_token.py](#running-get_tokenpy)). The `test/hbConfig` directory is gitignored, so your refresh token stays out of the repository
+3. Run `npm run watch` to build the plugin and run it in a local Homebridge instance, restarting it whenever the source changes

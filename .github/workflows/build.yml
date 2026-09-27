@@ -9,7 +9,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        node-version: [18.x, 20.x, 22.x]
+        # Keep in sync with `engines.node` in package.json
+        node-version: [20.x, 22.x, 24.x]
 
     steps:
       - uses: actions/checkout@v4
@@ -19,8 +20,9 @@ jobs:
         with:
           node-version: ${{ matrix.node-version }}
 
+      # `npm ci` installs exactly what the lockfile says, and fails if it's out of sync with package.json
       - name: Install dependencies
-        run: npm install
+        run: npm ci
 
       - name: Lint the project
         run: npm run lint
@@ -28,10 +30,18 @@ jobs:
       - name: Build the project
         run: npm run build
 
-      - name: List, audit, fix outdated dependencies and build again
-        run: |
-          npm list --outdated
-          npm audit || true  # ignore failures
-          npm audit fix || true
-          npm list --outdated
-          npm run build
+  audit:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Use Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22.x
+
+      # Only the runtime dependencies, since those are what users install along with the plugin.
+      # Fails on high and critical vulnerabilities; lower severities are only reported.
+      - name: Audit the runtime dependencies
+        run: npm audit --omit=dev --audit-level=high

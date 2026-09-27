@@ -5,7 +5,7 @@
   "strictValidation": true,
   "schema": {
     "type": "object",
-    "required": ["auth_mode"],
+    "required": ["auth_mode", "refresh_token"],
     "additionalProperties": false,
     "properties": {
       "name": {
@@ -29,6 +29,7 @@
       "refresh_token": {
         "title": "Refresh Token",
         "type": "string",
+        "minLength": 1,
         "placeholder": "eyJraWQiO...",
         "condition": {
           "functionBody": "return model.auth_mode === 'token';"
@@ -42,6 +43,7 @@
           "properties": {
             "name": {
               "title": "Device Name (Optional)",
+              "description": "Changing it renames the device and its light, fan, and filters in the Home app, replacing any names set there",
               "type": "string",
               "default": "",
               "placeholder": ""
@@ -49,6 +51,7 @@
             "id": {
               "title": "Device ID",
               "type": "string",
+              "minLength": 1,
               "placeholder": "PINb12jghtk23D9WEoweif"
             }
           }

@@ -1,6 +1,6 @@
 import type { Logging } from 'homebridge';
 import axios, { AxiosInstance } from 'axios';
-import MD5 from 'md5';
+import { createHash } from 'node:crypto';
 import zod from 'zod';
 import { err, ok, Result, ResultAsync } from 'neverthrow';
 import { OpenIDSession } from './openid.js';
@@ -61,7 +61,7 @@ export class Astarte {
   }
 
   private getAuthConfigHash(config: PluginConfig) {
-    return MD5(config.auth_mode + config.refresh_token);
+    return createHash('md5').update(config.auth_mode + config.refresh_token).digest('hex');
   }
 
   /**
