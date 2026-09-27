@@ -43,7 +43,7 @@ export class RangeHoodDevice extends BaseDevice {
     this.light_service = this.accessory.getService(this.platform.Service.Lightbulb) || this.accessory.addService(this.platform.Service.Lightbulb);
 
     // The light's default name is "<name> Light" (e.g. "RangeHood Light")
-    this.light_service.setCharacteristic(this.platform.Characteristic.Name, this.device_info.name + ' Light');
+    this.setServiceName(this.light_service, this.device_info.name + ' Light');
 
     // register handlers for the light's characteristics
     this.light_service.getCharacteristic(this.platform.Characteristic.On)
@@ -54,7 +54,7 @@ export class RangeHoodDevice extends BaseDevice {
       .onSet(this.setColorTemperature.bind(this));
 
     this.fan_service = this.accessory.getService(this.platform.Service.Fanv2) || this.accessory.addService(this.platform.Service.Fanv2);
-    this.fan_service.setCharacteristic(this.platform.Characteristic.Name, this.device_info.name + ' Fan');
+    this.setServiceName(this.fan_service, this.device_info.name + ' Fan');
 
     this.fan_service.getCharacteristic(this.platform.Characteristic.Active)
       .onSet(this.setFanActive.bind(this));
@@ -68,6 +68,7 @@ export class RangeHoodDevice extends BaseDevice {
       carbon_filter_service = this.accessory.addService(carbon_filter_service);
     }
     this.carbon_filter_service = <Service>carbon_filter_service;
+    this.setServiceName(this.carbon_filter_service, this.device_info.name + ' Carbon Filter');
 
     this.carbon_filter_service.getCharacteristic(this.platform.Characteristic.ResetFilterIndication)
       .onSet(this.resetCarbonFilter.bind(this));
@@ -78,6 +79,7 @@ export class RangeHoodDevice extends BaseDevice {
       grease_filter_service = this.accessory.addService(grease_filter_service);
     }
     this.grease_filter_service = <Service>grease_filter_service;
+    this.setServiceName(this.grease_filter_service, this.device_info.name + ' Grease Filter');
 
     this.grease_filter_service.getCharacteristic(this.platform.Characteristic.ResetFilterIndication)
       .onSet(this.resetGreaseFilter.bind(this));
