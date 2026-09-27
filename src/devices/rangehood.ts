@@ -154,7 +154,7 @@ export class RangeHoodDevice extends BaseDevice {
         this.propagateHapStatus(HAPStatus.SERVICE_COMMUNICATION_FAILURE);
       } else {
         // This sounds like a recoverable network error. No need to stop updating
-        setTimeout(() => this.updateHoodStatus, this.refresh_interval_ms);
+        setTimeout(() => this.updateHoodStatus(), this.refresh_interval_ms);
       }
       return;
     }
