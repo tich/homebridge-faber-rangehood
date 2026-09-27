@@ -147,9 +147,7 @@ export class RangeHoodDevice extends BaseDevice {
         throw new UnknownResponseError;
       }
     } catch(error) {
-      if (error instanceof TokenExpiredError) {
-        this.propagateHapStatus(HAPStatus.INSUFFICIENT_AUTHORIZATION);
-      } else if (error instanceof UnknownResponseError) {
+      if (error instanceof TokenExpiredError || error instanceof UnknownResponseError) {
         this.propagateHapStatus(HAPStatus.SERVICE_COMMUNICATION_FAILURE);
       } else {
         // This sounds like a recoverable network error. No need to stop updating
@@ -164,6 +162,10 @@ export class RangeHoodDevice extends BaseDevice {
         Math.round(mapRange(parsed_data!.data!.data.lights.channels[1].intensity.value, 0, this.max_light_intensity, 0, 100)));
     } else {
       this.light_service.updateCharacteristic(this.platform.Characteristic.On, false);
+      // Keep the last brightness, so turning the light back on restores it.
+      // Re-asserting it still clears any error status left behind by a failed write.
+      this.light_service.updateCharacteristic(this.platform.Characteristic.Brightness,
+        this.light_service.getCharacteristic(this.platform.Characteristic.Brightness).value!);
     }
 
     this.light_service.updateCharacteristic(this.platform.Characteristic.ColorTemperature,
@@ -175,6 +177,10 @@ export class RangeHoodDevice extends BaseDevice {
         mapRange(parsed_data!.data!.data.fan.speed.value, 0, this.max_fan_speed, 0, 100));
     } else {
       this.fan_service.updateCharacteristic(this.platform.Characteristic.Active, this.platform.Characteristic.Active.INACTIVE);
+      // Keep the last speed, so turning the fan back on restores it.
+      // Re-asserting it still clears any error status left behind by a failed write.
+      this.fan_service.updateCharacteristic(this.platform.Characteristic.RotationSpeed,
+        this.fan_service.getCharacteristic(this.platform.Characteristic.RotationSpeed).value!);
     }
 
     if (parsed_data!.data!.data.filters.fc.hoursUntilReplacement.value > 0) {
@@ -257,15 +263,16 @@ export class RangeHoodDevice extends BaseDevice {
         AstarteRequestMethod.POST,
         data);
     } catch(error) {
-      if (error instanceof TokenExpiredError) {
-        this.propagateHapStatus(HAPStatus.INSUFFICIENT_AUTHORIZATION);
-      } else if (error instanceof UnknownResponseError) {
+      // The error has been logged already.
+      if (error instanceof TokenExpiredError || error instanceof UnknownResponseError) {
+        // These point at a problem with the account or the API rather than a network blip,
+        // so mark the whole accessory as not responding
         this.propagateHapStatus(HAPStatus.SERVICE_COMMUNICATION_FAILURE);
-      } else {
-        // This sounds like a recoverable network error. No need to blow up
-        // The error has been logged already. Just return
-        return;
       }
+      // Otherwise this sounds like a recoverable network error, so only this request failed.
+      // The next successful status update clears the error from the characteristic.
+      // In all cases, tell HomeKit the write failed, so the Home app doesn't show a state the hood isn't in
+      throw new this.platform.api.hap.HapStatusError(HAPStatus.SERVICE_COMMUNICATION_FAILURE);
     }
   }
 

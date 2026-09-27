@@ -6,6 +6,9 @@ import { OPENID_AUTH_URL, OPENID_CLIENT_ID, OPENID_TOKEN_ENDPOINT, OPENID_TOKEN_
 import { NetworkServiceError, TokenExpiredError, UnknownResponseError } from '../lib/errors.js';
 import { toRedactedJSON } from '../lib/utils.js';
 
+const REFRESH_TOKEN_EXPIRED_MESSAGE =
+  'The refresh token has expired or is invalid. Please get a new one, update the plugin config, and restart Homebridge';
+
 /**
  * A class that's in charge of maintaining a valid OAuth/OpenID ID token
  * 
@@ -69,7 +72,7 @@ export class OpenIDSession {
     this.log.info('Refreshing OpenID token');
     this.id_token = '';
     if (!this.refresh_token) {
-      this.log.error('Cannot get OpenID token because the refresh token has expired or is invalid');
+      this.log.error(REFRESH_TOKEN_EXPIRED_MESSAGE);
       throw new TokenExpiredError;
     }
     await this.getIDTokenUsingRefreshToken();
@@ -118,6 +121,7 @@ export class OpenIDSession {
       response = await this.request.post(OPENID_TOKEN_ENDPOINT, request_data, { params: OPENID_TOKEN_EXTRA_PARAMETERS });
     } catch (error) {
       if (axios.isAxiosError(error) && error.status === 400) {
+        this.log.error(REFRESH_TOKEN_EXPIRED_MESSAGE);
         this.refresh_token = '';
         throw new TokenExpiredError;
       }
