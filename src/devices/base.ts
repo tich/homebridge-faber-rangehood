@@ -1,9 +1,9 @@
-import type { Logging, PlatformAccessory, Service } from 'homebridge';
+import type { PlatformAccessory, Service } from 'homebridge';
 import type { FaberHomebridgePlatform } from '../platform.js';
-import { Astarte } from '../api/astarte.js';
+import type { DeviceInfo } from './factory.js';
 
 export class BaseDevice {
-  protected readonly device_info;
+  protected readonly device_info: DeviceInfo;
 
   constructor(
     protected readonly platform: FaberHomebridgePlatform,
@@ -34,19 +34,5 @@ export class BaseDevice {
     if (!service.getCharacteristic(this.platform.Characteristic.ConfiguredName).value) {
       service.updateCharacteristic(this.platform.Characteristic.ConfiguredName, name);
     }
-  }
-
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  public static async getDeviceFeatures(log: Logging, astarte: Astarte, device_id: string) {
-    return {};
-  }
-
-  /**
-   * Get the device's firmware version, in HomeKit's numeric "x[.y[.z]]" format.
-   * Every device type must implement this.
-   */
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  public static async getFirmwareRevision(log: Logging, astarte: Astarte, device_id: string): Promise<string> {
-    throw new Error(`${this.name} doesn't implement getFirmwareRevision`);
   }
 }

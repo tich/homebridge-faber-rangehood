@@ -2,6 +2,7 @@ import { type Logging } from 'homebridge';
 import { EventEmitter } from 'node:events';
 import axios, { AxiosInstance } from 'axios';
 import zod from 'zod';
+import { err, ok, Result, ResultAsync } from 'neverthrow';
 import { OPENID_AUTH_URL, OPENID_CLIENT_ID, OPENID_TOKEN_ENDPOINT, OPENID_TOKEN_EXTRA_PARAMETERS } from './constants.js';
 import { NetworkServiceError, TokenExpiredError, UnknownResponseError } from '../lib/errors.js';
 import { toRedactedJSON } from '../lib/utils.js';
@@ -21,7 +22,7 @@ export class OpenIDSession {
 
   private refresh_token?: string;
   private id_token?: string;
-  private refresh_in_flight?: Promise<void>;
+  private refresh_in_flight?: Promise<Result<void, NetworkServiceError>>;
   private readonly request: AxiosInstance;
 
   constructor(
@@ -52,12 +53,13 @@ export class OpenIDSession {
 
   /**
    * Mark the ID token as invalid, and attempt to fetch a new one
-   * 
-   * @throws {UnknownResponseError} If we somehow failed to parse a response from the authorization service
-   * @throws {NetworkServiceError} If we encounter a transient network error (e.g. a network hiccup)
-   * @throws {TokenExpiredError} If all avenues for fetching a new ID token have expired
+   *
+   * @returns An error if that failed:
+   * - `TokenExpiredError` if all avenues for fetching a new ID token have expired
+   * - `UnknownResponseError` if we somehow failed to parse a response from the authorization service
+   * - `NetworkServiceError` if we encounter a transient network error (e.g. a network hiccup)
    */
-  async refreshToken() {
+  refreshToken(): ResultAsync<void, NetworkServiceError> {
     // Concurrent callers share a single in-flight refresh. The refresh token is rotated on every use,
     // so parallel refreshes would race to redeem (and persist) the same refresh token.
     if (!this.refresh_in_flight) {
@@ -65,18 +67,21 @@ export class OpenIDSession {
         this.refresh_in_flight = undefined;
       });
     }
-    await this.refresh_in_flight;
+    return new ResultAsync(this.refresh_in_flight);
   }
 
-  private async _refreshToken() {
+  private async _refreshToken(): Promise<Result<void, NetworkServiceError>> {
     this.log.info('Refreshing OpenID token');
     this.id_token = '';
     if (!this.refresh_token) {
       this.log.error(REFRESH_TOKEN_EXPIRED_MESSAGE);
-      throw new TokenExpiredError;
+      return err(new TokenExpiredError);
     }
-    await this.getIDTokenUsingRefreshToken();
-    this.emitTokenChanged(this.id_token!, this.refresh_token!);
+    const result = await this.getIDTokenUsingRefreshToken();
+    if (result.isOk()) {
+      this.emitTokenChanged(this.id_token!, this.refresh_token!);
+    }
+    return result;
   }
 
   /**
@@ -105,7 +110,7 @@ export class OpenIDSession {
     this.emitter.on('tokenChanged', handler);
   }
 
-  private async getIDTokenUsingRefreshToken() {
+  private async getIDTokenUsingRefreshToken(): Promise<Result<void, NetworkServiceError>> {
     this.log.info('Refreshing OpenID token using refresh token');
     const request_data = {
       grant_type: 'refresh_token',
@@ -116,29 +121,31 @@ export class OpenIDSession {
       id_token: zod.string(),
       refresh_token: zod.string(),
     });
-    let response;
-    try {
-      response = await this.request.post(OPENID_TOKEN_ENDPOINT, request_data, { params: OPENID_TOKEN_EXTRA_PARAMETERS });
-    } catch (error) {
+    const response = await ResultAsync.fromPromise(
+      this.request.post(OPENID_TOKEN_ENDPOINT, request_data, { params: OPENID_TOKEN_EXTRA_PARAMETERS }),
+      (error) => error);
+    if (response.isErr()) {
+      const error = response.error;
       if (axios.isAxiosError(error) && error.status === 400) {
         this.log.error(REFRESH_TOKEN_EXPIRED_MESSAGE);
         this.refresh_token = '';
-        throw new TokenExpiredError;
+        return err(new TokenExpiredError);
       }
       // Don't log the whole error: an AxiosError carries the request config, whose body holds the refresh token
       this.log.error('Failed to refresh the OpenID token:',
         axios.isAxiosError(error) ? error.status : undefined, (error as Error).message);
-      throw new NetworkServiceError;
+      return err(new NetworkServiceError);
     }
 
-    const parsed_response = ResponseFormat.safeParse(response.data);
+    const parsed_response = ResponseFormat.safeParse(response.value.data);
     if (!parsed_response.success) {
-      this.log.error('Failed to parse the OpenID token refresh response:', parsed_response.error, 'Received:', toRedactedJSON(response.data));
+      this.log.error('Failed to parse the OpenID token refresh response:', parsed_response.error, 'Received:', toRedactedJSON(response.value.data));
       this.refresh_token = '';
-      throw new UnknownResponseError;
+      return err(new UnknownResponseError);
     }
     this.id_token = parsed_response.data.id_token;
     this.refresh_token = parsed_response.data.refresh_token;
+    return ok();
   }
 
   private emitTokenChanged(id_token: string, refresh_token: string) {

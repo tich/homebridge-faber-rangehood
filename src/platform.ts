@@ -4,17 +4,14 @@ import * as Path from 'path';
 import { PLATFORM_NAME, PLUGIN_NAME } from './settings.js';
 import { Astarte } from './api/astarte.js';
 import { ObjectStore } from './lib/objectstore.js';
-import { DeviceFactory, DeviceInfo, INFO_VERSION } from './devices/factory.js';
-import { isTransientError } from './lib/errors.js';
+import { DeviceFactory, DeviceInfo } from './devices/factory.js';
+import { InvalidConfigError, isTransientError } from './lib/errors.js';
+import { DeviceConfig, parsePluginConfig, PluginConfig } from './config.js';
+import { Result } from 'neverthrow';
 
 // Backoff for retrying operations that failed with a network error at startup
 const RETRY_MIN_DELAY_MS = 10 * 1000;
 const RETRY_MAX_DELAY_MS = 5 * 60 * 1000;
-
-interface DeviceConfig {
-  name: string,
-  id: string
-}
 
 /**
  * FaberHomebridgePlatform
@@ -30,6 +27,7 @@ export class FaberHomebridgePlatform implements DynamicPlatformPlugin {
 
   public readonly astarte: Astarte;
   private readonly object_store: ObjectStore;
+  private readonly plugin_config: Result<PluginConfig, InvalidConfigError>;
 
   constructor(
     public readonly log: Logging,
@@ -40,7 +38,8 @@ export class FaberHomebridgePlatform implements DynamicPlatformPlugin {
     this.Characteristic = api.hap.Characteristic;
 
     this.object_store = new ObjectStore(Path.join(api.user.storagePath(), PLUGIN_NAME, 'persist'));
-    this.astarte = new Astarte(log, config, this.object_store);
+    this.astarte = new Astarte(log, this.object_store);
+    this.plugin_config = parsePluginConfig(config);
 
     this.log.debug('Finished initializing platform:', this.config.name);
 
@@ -50,9 +49,39 @@ export class FaberHomebridgePlatform implements DynamicPlatformPlugin {
     // to start discovery of new accessories.
     this.api.on('didFinishLaunching', async () => {
       log.debug('Executing didFinishLaunching callback');
-      await this.object_store.init();
-      await this.initAstarteAndDiscoverDevices();
+      if (this.plugin_config.isErr()) {
+        // The cached accessories stay in HomeKit, but won't respond until the config is fixed
+        this.log.error('The plugin config is invalid, so the plugin won\'t start. Please fix it:\n' + this.plugin_config.error.message);
+        return;
+      }
+      const plugin_config = this.plugin_config.value;
+
+      const storage = await this.object_store.init();
+      if (storage.isErr()) {
+        this.log.error('Failed to initialize the plugin\'s storage in', this.object_store.storage_path,
+          'Please check that Homebridge can write to it', storage.error.cause);
+        return;
+      }
+      await this.runSafely('starting up', () => this.initAstarteAndDiscoverDevices(plugin_config));
     });
+  }
+
+  /**
+   * Run a task, logging any unexpected error. Expected errors are returned as Results rather than thrown,
+   * so this only catches bugs, or errors thrown by the Homebridge and HAP-NodeJS APIs.
+   *
+   * This wraps the plugin's asynchronous entry points (i.e. event handlers and timer callbacks), since an error escaping
+   * them would be an unhandled promise rejection, which makes Homebridge shut down entirely. It also wraps each device's
+   * setup, so that one device failing doesn't prevent the others from being set up.
+   *
+   * @param description What the task does, for the log (e.g. "starting up")
+   */
+  private async runSafely(description: string, task: () => Promise<void>) {
+    try {
+      await task();
+    } catch(error) {
+      this.log.error('Unexpected error while', description, error);
+    }
   }
 
   /**
@@ -62,21 +91,22 @@ export class FaberHomebridgePlatform implements DynamicPlatformPlugin {
    * (e.g. after a power outage). Until then, the cached accessories stay in HomeKit, but don't respond.
    * Other errors need the user to step in (e.g. to provide a new refresh token), so they aren't retried.
    */
-  private async initAstarteAndDiscoverDevices(retry_delay_ms = RETRY_MIN_DELAY_MS) {
-    try {
-      await this.astarte.init();
-    } catch(error) {
-      if (!isTransientError(error)) {
-        this.log.error('Astarte initialization failed', error);
+  private async initAstarteAndDiscoverDevices(config: PluginConfig, retry_delay_ms = RETRY_MIN_DELAY_MS) {
+    const init = await this.astarte.init(config);
+    if (init.isErr()) {
+      if (!isTransientError(init.error)) {
+        this.log.error('Astarte initialization failed', init.error);
         return;
       }
       this.log.warn(`Astarte initialization failed. Retrying in ${retry_delay_ms / 1000} seconds`);
-      setTimeout(() => this.initAstarteAndDiscoverDevices(Math.min(retry_delay_ms * 2, RETRY_MAX_DELAY_MS)), retry_delay_ms);
+      setTimeout(() => this.runSafely('starting up',
+        () => this.initAstarteAndDiscoverDevices(config, Math.min(retry_delay_ms * 2, RETRY_MAX_DELAY_MS))),
+      retry_delay_ms);
       return;
     }
 
     // run the method to discover / register your devices as accessories
-    await this.discoverDevices();
+    await this.discoverDevices(config);
   }
 
   /**
@@ -90,14 +120,24 @@ export class FaberHomebridgePlatform implements DynamicPlatformPlugin {
     this.accessories.set(accessory.UUID, accessory);
   }
 
-  private async discoverDevices() {
+  private async discoverDevices(config: PluginConfig) {
     const discoveredUUIDs: string[] = [];
     const devicesInAccount = this.astarte.getDevices();
+    const configuredDevices = config.devices;
+    if (configuredDevices.length === 0) {
+      this.log.warn('No devices are configured, so none will be exposed to HomeKit. Add your devices to the plugin config');
+    }
+    for (const deviceConfig of configuredDevices) {
+      if (!devicesInAccount.includes(deviceConfig.id)) {
+        this.log.warn('Device ID', deviceConfig.id, 'from the plugin config isn\'t in your Faber account, so it will be ignored.',
+          'Devices in your account:', devicesInAccount.join(', '));
+      }
+    }
 
     // loop over the discovered devices and register each one if it has not already been registered
     for (const deviceId of devicesInAccount) {
       // Filter out the ones that are not in the config
-      const deviceConfig: DeviceConfig | undefined = this.config.devices.find((device: DeviceConfig) => {
+      const deviceConfig: DeviceConfig | undefined = configuredDevices.find((device: DeviceConfig) => {
         return device.id === deviceId;
       });
       if (!deviceConfig) {
@@ -112,7 +152,7 @@ export class FaberHomebridgePlatform implements DynamicPlatformPlugin {
       // Mark it as discovered even if setting it up fails below, so a transient error doesn't remove it from HomeKit
       discoveredUUIDs.push(uuid);
 
-      await this.setUpDevice(deviceId, deviceConfig, uuid);
+      await this.runSafely(`setting up device ID ${deviceId}`, () => this.setUpDevice(deviceId, deviceConfig, uuid));
     }
 
     // Remove devices which are no longer present by removing them from Homebridge
@@ -128,7 +168,7 @@ export class FaberHomebridgePlatform implements DynamicPlatformPlugin {
    * Create or restore a device's accessory, and its handler.
    *
    * The device info is always refreshed, to pick up changes such as a firmware update or a renamed device.
-   * If that fails, the cached device info is used instead, as long as it's in the current format.
+   * If that fails, the cached device info is used instead, as long as it's valid and in the current format.
    * Otherwise, a network error is retried with an exponential backoff. Until then, a cached accessory stays in HomeKit,
    * but doesn't respond, and a new device isn't added yet.
    */
@@ -137,16 +177,21 @@ export class FaberHomebridgePlatform implements DynamicPlatformPlugin {
     // the cached devices we stored in the `configureAccessory` method above
     const existingAccessory = this.accessories.get(uuid);
 
+    const fetchedDeviceInfo = await DeviceFactory.getDeviceInfo(this.log, this.astarte, deviceId, deviceConfig.name ?? '');
     let deviceInfo: DeviceInfo;
-    try {
-      deviceInfo = await DeviceFactory.getDeviceInfo(this.log, this.astarte, deviceId, deviceConfig.name);
-    } catch(error) {
-      if (existingAccessory?.context.device?.info_version === INFO_VERSION) {
+    if (fetchedDeviceInfo.isOk()) {
+      deviceInfo = fetchedDeviceInfo.value;
+    } else {
+      const error = fetchedDeviceInfo.error;
+      const cachedDeviceInfo = existingAccessory ? DeviceFactory.parseCachedDeviceInfo(existingAccessory.context.device) : undefined;
+      if (cachedDeviceInfo?.isOk()) {
         this.log.warn('Failed to refresh the device info for device ID', deviceId, 'Using the cached device info');
-        deviceInfo = existingAccessory.context.device;
+        deviceInfo = cachedDeviceInfo.value;
       } else if (isTransientError(error)) {
         this.log.warn(`Failed to get device info for device ID ${deviceId}. Retrying in ${retry_delay_ms / 1000} seconds`);
-        setTimeout(() => this.setUpDevice(deviceId, deviceConfig, uuid, Math.min(retry_delay_ms * 2, RETRY_MAX_DELAY_MS)), retry_delay_ms);
+        setTimeout(() => this.runSafely(`setting up device ID ${deviceId}`,
+          () => this.setUpDevice(deviceId, deviceConfig, uuid, Math.min(retry_delay_ms * 2, RETRY_MAX_DELAY_MS))),
+        retry_delay_ms);
         return;
       } else {
         this.log.error('Failed to get device info for device ID', deviceId, error);
@@ -154,28 +199,23 @@ export class FaberHomebridgePlatform implements DynamicPlatformPlugin {
       }
     }
 
+    // create a new accessory if needed, and store a copy of the device info in the accessory context
+    const accessory = existingAccessory ?? new this.api.platformAccessory(deviceInfo.name, uuid);
+    accessory.context.device = deviceInfo;
+
+    // create the accessory handler
+    const device = DeviceFactory.constructDevice(this, accessory);
+    if (device.isErr()) {
+      this.log.error('Failed to set up device ID', deviceId, device.error);
+      return;
+    }
+
     if (existingAccessory) {
-      // the accessory already exists
-      this.log.info('Restoring existing accessory from cache:', existingAccessory.displayName);
-      existingAccessory.context.device = deviceInfo;
-
-      // create the accessory handler for the restored accessory
-      DeviceFactory.constructDevice(this, existingAccessory);
-
+      this.log.info('Restored existing accessory from cache:', existingAccessory.displayName);
       // Persist the refreshed device info, and any services the handler added or removed
       this.api.updatePlatformAccessories([existingAccessory]);
     } else {
       this.log.info('Adding new accessory:', deviceInfo.name);
-
-      // create a new accessory
-      const accessory = new this.api.platformAccessory(deviceInfo.name, uuid);
-
-      // store a copy of the device info in the accessory context
-      accessory.context.device = deviceInfo;
-
-      // create the accessory handler for the newly create accessory
-      DeviceFactory.constructDevice(this, accessory);
-
       // link the accessory to our platform
       this.api.registerPlatformAccessories(PLUGIN_NAME, PLATFORM_NAME, [accessory]);
     }

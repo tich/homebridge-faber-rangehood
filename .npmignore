@@ -134,3 +134,5 @@ web_modules/
 .pnp.*
 
 test/
+# local eslint rules
+eslint-rules

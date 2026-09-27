@@ -38,7 +38,3 @@ In order to obtain both of those pieces of information, you'll need to run the `
 ### Troubleshooting get_token.py
 
 - If you get an error that looks like `urlopen error [SSL: CERTIFICATE_VERIFY_FAILED]`, then try installing the `pip-system-certs` Python package (e.g. `pip3 install pip-system-certs`)
-
-# TODO
-
-- Enforce no-throw somehow, or convert all exceptions to errors (using the neverthrow module)

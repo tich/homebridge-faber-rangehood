@@ -1,5 +1,6 @@
 import { CharacteristicValue, HAPStatus, Logging, PlatformAccessory, Service } from 'homebridge';
 import zod from 'zod';
+import { err, ok, Result } from 'neverthrow';
 import { FaberHomebridgePlatform } from '../platform.js';
 import { BaseDevice } from './base.js';
 import { Astarte, AstarteRequestMethod } from '../api/astarte.js';
@@ -9,7 +10,7 @@ import {
   ASTARTE_INTERFACE_HOOD_MOTOR_PROPERTIES,
   ASTARTE_INTERFACE_HOOD_STATUS }
   from '../api/constants.js';
-import { TokenExpiredError, UnknownResponseError } from '../lib/errors.js';
+import { InvalidCacheError, NetworkServiceError, TokenExpiredError, UnknownResponseError } from '../lib/errors.js';
 import { mapRange } from '../lib/utils.js';
 import { ChannelWriter } from '../lib/channelwriter.js';
 import { PLUGIN_VERSION } from '../settings.js';
@@ -43,7 +44,48 @@ interface HoodCapabilities {
   grease_filter_hours?: number;
 }
 
-type HoodFeatures = Awaited<ReturnType<typeof RangeHoodDevice.getDeviceFeatures>>;
+// Everything is optional, since not every hood has every feature. See `getCapabilities`
+const FeaturesResponseFormat = zod.object({
+  data: zod.object({
+    filters: zod.object({
+      fc: zod.object({
+        replacementHours: zod.number(),
+      }).optional(),
+      fg: zod.object({
+        replacementHours: zod.number(),
+      }).optional(),
+    }).optional(),
+    lights: zod.object({
+      channels: zod.object({
+        1: zod.object({
+          maxIntensity: zod.number(),
+        }).optional(),
+        2: zod.object({
+          maxIntensity: zod.number(),
+        }).optional(),
+      }),
+      tunableWhite: zod.object({
+        enabled: zod.boolean(),
+      }).optional(),
+    }).optional(),
+  }),
+});
+
+const MotorPropertiesResponseFormat = zod.object({
+  data: zod.object({
+    maxFanSpeed: zod.number(),
+  }),
+});
+
+/**
+ * The features stored in a hood's device info
+ */
+const HoodFeaturesFormat = zod.object({
+  features: FeaturesResponseFormat.shape.data,
+  motor: MotorPropertiesResponseFormat.shape.data,
+});
+
+type HoodFeatures = zod.infer<typeof HoodFeaturesFormat>;
 
 export class RangeHoodDevice extends BaseDevice {
   private readonly capabilities: HoodCapabilities;
@@ -83,7 +125,8 @@ export class RangeHoodDevice extends BaseDevice {
 
     // TODO Adaptive Lighting support? https://github.com/homebridge-plugins/homebridge-meross/blob/latest/lib/device/light-cct.js#L97
 
-    this.capabilities = RangeHoodDevice.getCapabilities(this.device_info.features);
+    // The features were validated when the device info was built (see `getDeviceFeatures` and `parseCachedFeatures`)
+    this.capabilities = RangeHoodDevice.getCapabilities(this.device_info.features as HoodFeatures);
 
     // Only expose what the hood supports. Services and characteristics for unsupported features are removed,
     // in case they were created by an earlier version of the plugin that exposed everything.
@@ -280,22 +323,20 @@ export class RangeHoodDevice extends BaseDevice {
     });
 
     const poll_write_generation = this.write_generation;
-    let parsed_data = undefined;
-    try {
-      const data = await this.platform.astarte.doRequest(this.device_info.id, ASTARTE_INTERFACE_HOOD_STATUS, AstarteRequestMethod.GET, {});
-      if (this.isPollOutdated(poll_write_generation)) {
-        return;
-      }
-      parsed_data = ResponseFormat.safeParse(data);
+    const data = await this.platform.astarte.doRequest(this.device_info.id, ASTARTE_INTERFACE_HOOD_STATUS, AstarteRequestMethod.GET, {});
+    if (this.isPollOutdated(poll_write_generation)) {
+      return;
+    }
+    const parsed_status = data.andThen((value) => {
+      const parsed_data = ResponseFormat.safeParse(value);
       if (!parsed_data.success) {
-        this.platform.log.error('Failed to parse the hood status response', parsed_data.error, 'Received:', JSON.stringify(data));
-        throw new UnknownResponseError;
+        this.platform.log.error('Failed to parse the hood status response', parsed_data.error, 'Received:', JSON.stringify(value));
+        return err(new UnknownResponseError);
       }
-    } catch(error) {
-      if (this.isPollOutdated(poll_write_generation)) {
-        return;
-      }
-      if (error instanceof TokenExpiredError || error instanceof UnknownResponseError) {
+      return ok(parsed_data.data.data);
+    });
+    if (parsed_status.isErr()) {
+      if (parsed_status.error instanceof TokenExpiredError || parsed_status.error instanceof UnknownResponseError) {
         this.propagateHapStatus(HAPStatus.SERVICE_COMMUNICATION_FAILURE);
         this.polling_stopped = true;
       } else {
@@ -308,7 +349,7 @@ export class RangeHoodDevice extends BaseDevice {
       }
       return;
     }
-    const status = parsed_data!.data!.data;
+    const status = parsed_status.value;
 
     if (this.consecutive_poll_failures > 0) {
       this.platform.log.info('Reconnected to', this.device_info.name);
@@ -370,60 +411,40 @@ export class RangeHoodDevice extends BaseDevice {
     }
   }
 
-  public static async getDeviceFeatures(log: Logging, astarte: Astarte, device_id: string) {
-    // Everything is optional, since not every hood has every feature. See `getCapabilities`
-    const FeaturesResponseFormat = zod.object({
-      data: zod.object({
-        filters: zod.object({
-          fc: zod.object({
-            replacementHours: zod.number(),
-          }).optional(),
-          fg: zod.object({
-            replacementHours: zod.number(),
-          }).optional(),
-        }).optional(),
-        lights: zod.object({
-          channels: zod.object({
-            1: zod.object({
-              maxIntensity: zod.number(),
-            }).optional(),
-            2: zod.object({
-              maxIntensity: zod.number(),
-            }).optional(),
-          }),
-          tunableWhite: zod.object({
-            enabled: zod.boolean(),
-          }).optional(),
-        }).optional(),
-      }),
-    });
+  public static async getDeviceFeatures(log: Logging, astarte: Astarte, device_id: string): Promise<Result<HoodFeatures, NetworkServiceError>> {
     const feature_data = await astarte.doRequest(device_id, ASTARTE_INTERFACE_HOOD_FEATURES, AstarteRequestMethod.GET, {});
-    const parsed_feature_data = FeaturesResponseFormat.safeParse(feature_data);
+    if (feature_data.isErr()) {
+      return err(feature_data.error);
+    }
+    const parsed_feature_data = FeaturesResponseFormat.safeParse(feature_data.value);
     if (!parsed_feature_data.success) {
-      log.error('Failed to parse the device features response', parsed_feature_data.error, 'Received:', JSON.stringify(feature_data));
-      throw new UnknownResponseError;
+      log.error('Failed to parse the device features response', parsed_feature_data.error, 'Received:', JSON.stringify(feature_data.value));
+      return err(new UnknownResponseError);
     }
 
-    const MotorPropertiesResponseFormat = zod.object({
-      data: zod.object({
-        maxFanSpeed: zod.number(),
-      }),
-    });
     const motor_data = await astarte.doRequest(device_id, ASTARTE_INTERFACE_HOOD_MOTOR_PROPERTIES, AstarteRequestMethod.GET, {});
-    const parsed_motor_data = MotorPropertiesResponseFormat.safeParse(motor_data);
+    if (motor_data.isErr()) {
+      return err(motor_data.error);
+    }
+    const parsed_motor_data = MotorPropertiesResponseFormat.safeParse(motor_data.value);
     if (!parsed_motor_data.success) {
-      log.error('Failed to parse the device motor properties response', parsed_motor_data.error, 'Received:', JSON.stringify(motor_data));
-      throw new UnknownResponseError;
+      log.error('Failed to parse the device motor properties response', parsed_motor_data.error, 'Received:', JSON.stringify(motor_data.value));
+      return err(new UnknownResponseError);
     }
 
-    return { features: parsed_feature_data.data!.data, motor: parsed_motor_data.data!.data };
+    return ok({ features: parsed_feature_data.data.data, motor: parsed_motor_data.data.data });
+  }
+
+  public static parseCachedFeatures(features: unknown): Result<HoodFeatures, InvalidCacheError> {
+    const parsed = HoodFeaturesFormat.safeParse(features);
+    return parsed.success ? ok(parsed.data) : err(new InvalidCacheError(zod.prettifyError(parsed.error)));
   }
 
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  public static async getFirmwareRevision(log: Logging, astarte: Astarte, device_id: string) {
+  public static async getFirmwareRevision(log: Logging, astarte: Astarte, device_id: string): Promise<Result<string, NetworkServiceError>> {
     // The hood's firmware version isn't available from the cloud API, so report the plugin's version instead.
     // HomeKit expects a numeric "x[.y[.z]]" version, so drop any pre-release suffix (e.g. "-beta.1")
-    return PLUGIN_VERSION.split('-')[0];
+    return ok(PLUGIN_VERSION.split('-')[0]);
   }
 
   /**
@@ -448,23 +469,23 @@ export class RangeHoodDevice extends BaseDevice {
 
   private async sendControlRequest(api_interface: string, data: Record<string, unknown>) {
     await this.pausePollingDuring(async () => {
-      try {
-        this.platform.log.debug('Sending:', api_interface, JSON.stringify(data));
-        await this.platform.astarte.doRequest(
-          this.device_info.id,
-          ASTARTE_INTERFACE_HOOD_CONTROL + api_interface,
-          AstarteRequestMethod.POST,
-          data);
-      } catch(error) {
+      this.platform.log.debug('Sending:', api_interface, JSON.stringify(data));
+      const result = await this.platform.astarte.doRequest(
+        this.device_info.id,
+        ASTARTE_INTERFACE_HOOD_CONTROL + api_interface,
+        AstarteRequestMethod.POST,
+        data);
+      if (result.isErr()) {
         // The error has been logged already.
-        if (error instanceof TokenExpiredError || error instanceof UnknownResponseError) {
+        if (result.error instanceof TokenExpiredError || result.error instanceof UnknownResponseError) {
           // These point at a problem with the account or the API rather than a network blip,
           // so mark the whole accessory as not responding
           this.propagateHapStatus(HAPStatus.SERVICE_COMMUNICATION_FAILURE);
         }
         // Otherwise this sounds like a recoverable network error, so only this request failed.
         // The next successful status update clears the error from the characteristic.
-        // In all cases, tell HomeKit the write failed, so the Home app doesn't show a state the hood isn't in
+        // In all cases, tell HomeKit the write failed, so the Home app doesn't show a state the hood isn't in.
+        // This is where Results meet HAP-NodeJS, which expects a write handler to throw a HapStatusError
         throw new this.platform.api.hap.HapStatusError(HAPStatus.SERVICE_COMMUNICATION_FAILURE);
       }
     });

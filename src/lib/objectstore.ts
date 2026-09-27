@@ -1,21 +1,36 @@
 import NodePersist from 'node-persist';
+import { ResultAsync } from 'neverthrow';
+import { StorageError } from './errors.js';
+
+export interface TokenData {
+  hashed_auth_cfg: string;
+  id_token: string;
+  refresh_token: string;
+}
 
 export class ObjectStore {
   protected node_persist: NodePersist.LocalStorage;
 
-  constructor(storage_path: string) {
+  constructor(public readonly storage_path: string) {
     this.node_persist = NodePersist.create({ dir: storage_path, writeQueue: false });
   }
 
-  async init() {
-    await this.node_persist.init();
+  init(): ResultAsync<void, StorageError> {
+    return ResultAsync.fromPromise(this.node_persist.init(), (error) => new StorageError('Failed to initialize the storage', { cause: error }))
+      .map(() => undefined);
   }
 
-  async setTokenData(token_data: Record<string, unknown>) {
-    await this.node_persist.setItem('tokens', token_data);
+  setTokenData(token_data: TokenData): ResultAsync<void, StorageError> {
+    return ResultAsync.fromPromise(this.node_persist.setItem('tokens', token_data),
+      (error) => new StorageError('Failed to store the tokens', { cause: error }))
+      .map(() => undefined);
   }
 
-  async getTokenData() {
-    return await this.node_persist.getItem('tokens');
+  /**
+   * @returns The stored token data, or `undefined` if none was stored yet
+   */
+  getTokenData(): ResultAsync<TokenData | undefined, StorageError> {
+    return ResultAsync.fromPromise(this.node_persist.getItem('tokens') as Promise<TokenData | undefined>,
+      (error) => new StorageError('Failed to read the tokens', { cause: error }));
   }
 }

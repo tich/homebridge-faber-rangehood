@@ -1,5 +1,6 @@
 import eslint from '@eslint/js';
 import tseslint from 'typescript-eslint';
+import mustUseResult from './eslint-rules/must-use-result.js';
 
 export default tseslint.config(
   {
@@ -32,4 +33,21 @@ export default tseslint.config(
   },
   eslint.configs.recommended,
   ...tseslint.configs.recommended,
+  {
+    // Type-aware rules, to make sure errors are handled
+    files: ['src/**/*.ts'],
+    languageOptions: {
+      parserOptions: {
+        projectService: true,
+        tsconfigRootDir: import.meta.dirname,
+      },
+    },
+    plugins: {
+      local: { rules: { 'must-use-result': mustUseResult } },
+    },
+    rules: {
+      'local/must-use-result': 'error',
+      '@typescript-eslint/no-floating-promises': 'error',
+    },
+  },
 );

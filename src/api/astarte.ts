@@ -1,10 +1,12 @@
-import type { Logging, PlatformConfig } from 'homebridge';
+import type { Logging } from 'homebridge';
 import axios, { AxiosInstance } from 'axios';
 import MD5 from 'md5';
 import zod from 'zod';
+import { err, ok, Result, ResultAsync } from 'neverthrow';
 import { OpenIDSession } from './openid.js';
 import { ObjectStore } from '../lib/objectstore.js';
-import { InvalidConfigError, NetworkServiceError, UnknownResponseError } from '../lib/errors.js';
+import { NetworkServiceError, StorageError, UnknownResponseError } from '../lib/errors.js';
+import type { PluginConfig } from '../config.js';
 import { toRedactedJSON } from '../lib/utils.js';
 import { ASTARTE_API_ENDPOINT, ASTARTE_API_URL, ASTARTE_AUTH_URL, ASTARTE_REALM, ASTARTE_TOKEN_ENDPOINT, ASTARTE_USER_INFO_ENDPOINT } from './constants.js';
 
@@ -23,19 +25,15 @@ export class Astarte {
   private user_id?: string;
   private devices?: string[];
   private id_token?: string;
-  private refresh_in_flight?: Promise<void>;
+  private refresh_in_flight?: Promise<Result<void, NetworkServiceError>>;
 
   constructor(
     private readonly log: Logging,
-    private readonly config: PlatformConfig,
     private readonly object_store: ObjectStore,
   ) {
     this.openid_session = new OpenIDSession(log);
-    this.openid_session.onTokenChanged(async (id_token: string, refresh_token: string) => {
-      const persisted_auth_data = await this.object_store.getTokenData();
-      persisted_auth_data.id_token = id_token;
-      persisted_auth_data.refresh_token = refresh_token;
-      await this.object_store.setTokenData(persisted_auth_data);
+    this.openid_session.onTokenChanged((id_token: string, refresh_token: string) => {
+      void this.persistTokens(id_token, refresh_token);
     });
 
     this.auth_request = axios.create({
@@ -49,35 +47,44 @@ export class Astarte {
     this.api_request.defaults.headers.post['Content-Type'] = 'application/json';
   }
 
-  private getAuthConfigHash() {
-    let auth_cfg_str = this.config.auth_mode;
-    if (this.config.auth_mode === 'token') {
-      auth_cfg_str += this.config.refresh_token;
-    } else {
-      throw new InvalidConfigError(`Unhandled auth mode: ${this.config.auth_mode}`);
+  /**
+   * Persist refreshed tokens, so they survive a restart. The refresh token is rotated on every use,
+   * so the one from the plugin config may not be valid anymore.
+   * A failure is only logged, since the tokens in memory remain valid.
+   */
+  private async persistTokens(id_token: string, refresh_token: string) {
+    const result = await this.object_store.getTokenData()
+      .andThen((token_data) => this.object_store.setTokenData({ hashed_auth_cfg: token_data?.hashed_auth_cfg ?? '', id_token, refresh_token }));
+    if (result.isErr()) {
+      this.log.warn('Failed to store the refreshed tokens. After a restart, you may need to provide a new refresh token', result.error.cause);
     }
-    return MD5(auth_cfg_str);
+  }
+
+  private getAuthConfigHash(config: PluginConfig) {
+    return MD5(config.auth_mode + config.refresh_token);
   }
 
   /**
    * Make sure we have an OpenID ID token, fetching a new one with the refresh token if needed.
    * The ID token can be missing if a previous refresh attempt failed (e.g. a network hiccup).
-   *
-   * @throws {TokenExpiredError} If all avenues for fetching a new ID token have expired
    */
-  private async ensureOpenIdToken() {
-    if (!this.openid_session.isValid()) {
-      await this.openid_session.refreshToken();
+  private async ensureOpenIdToken(): Promise<Result<void, NetworkServiceError>> {
+    if (this.openid_session.isValid()) {
+      return ok();
     }
+    return await this.openid_session.refreshToken();
   }
 
-  private async fetchUserId(is_retry: boolean = false): Promise<void> {
+  private async fetchUserId(is_retry: boolean = false): Promise<Result<void, NetworkServiceError>> {
     if (this.user_id !== undefined) {
       // Already done.
-      return;
+      return ok();
     }
 
-    await this.ensureOpenIdToken();
+    const openid_token = await this.ensureOpenIdToken();
+    if (openid_token.isErr()) {
+      return openid_token;
+    }
 
     const ResponseFormat = zod.object({
       data: zod.object({
@@ -85,45 +92,46 @@ export class Astarte {
       }),
     });
 
-    let response;
-    try {
-      response = await this.auth_request.get(`${ASTARTE_USER_INFO_ENDPOINT}/${ASTARTE_REALM}`,
-        { headers: { 'sso-token': this.openid_session.getIdToken() } });
-    } catch (error) {
+    const response = await ResultAsync.fromPromise(
+      this.auth_request.get(`${ASTARTE_USER_INFO_ENDPOINT}/${ASTARTE_REALM}`, { headers: { 'sso-token': this.openid_session.getIdToken() } }),
+      (error) => error);
+    if (response.isErr()) {
+      const error = response.error;
       const status = axios.isAxiosError(error) ? error.status : undefined;
       if (!is_retry && status === 403) {
         // This error code is returned if the ID token is expired
-        // Refresh the ID token
-        await this.openid_session.refreshToken();
-        // Retry the call
-        return await this.fetchUserId(true);
+        // Refresh the ID token, then retry the call
+        const refreshed = await this.openid_session.refreshToken();
+        return refreshed.isErr() ? refreshed : await this.fetchUserId(true);
       }
       this.log.error('Failed to query Astarte user info:', status, (error as Error).message);
-      throw new NetworkServiceError;
+      return err(new NetworkServiceError);
     }
 
-    const parsed_response = ResponseFormat.safeParse(response.data);
+    const parsed_response = ResponseFormat.safeParse(response.value.data);
     if (!parsed_response.success) {
-      this.log.error('Failed to parse the Astarte user info response:', parsed_response.error, 'Received:', toRedactedJSON(response.data));
-      throw new UnknownResponseError;
+      this.log.error('Failed to parse the Astarte user info response:', parsed_response.error, 'Received:', toRedactedJSON(response.value.data));
+      return err(new UnknownResponseError);
     }
     this.user_id = parsed_response.data.data.user_id;
+    return ok();
   }
 
-  private async refreshToken() {
+  private refreshToken(): ResultAsync<void, NetworkServiceError> {
     // Concurrent callers (e.g. several requests that all got a 403) share a single in-flight refresh
     if (!this.refresh_in_flight) {
       this.refresh_in_flight = this._refreshToken().finally(() => {
         this.refresh_in_flight = undefined;
       });
     }
-    await this.refresh_in_flight;
+    return new ResultAsync(this.refresh_in_flight);
   }
 
-  private async _refreshToken(is_retry: boolean = false): Promise<void> {
-    await this.ensureOpenIdToken();
-
-    await this.fetchUserId();
+  private async _refreshToken(is_retry: boolean = false): Promise<Result<void, NetworkServiceError>> {
+    const user_id = await this.ensureOpenIdToken().then((result) => result.isOk() ? this.fetchUserId() : result);
+    if (user_id.isErr()) {
+      return user_id;
+    }
 
     const ResponseFormat = zod.object({
       data: zod.object({
@@ -136,28 +144,28 @@ export class Astarte {
       }),
     });
 
-    let response;
-    try {
-      response = await this.auth_request.get(`${ASTARTE_TOKEN_ENDPOINT}/${ASTARTE_REALM}/users/${this.user_id!}/devices`,
-        { headers: { 'sso-token': this.openid_session.getIdToken() } });
-    } catch (error) {
+    const response = await ResultAsync.fromPromise(
+      this.auth_request.get(`${ASTARTE_TOKEN_ENDPOINT}/${ASTARTE_REALM}/users/${this.user_id!}/devices`,
+        { headers: { 'sso-token': this.openid_session.getIdToken() } }),
+      (error) => error);
+    if (response.isErr()) {
+      const error = response.error;
       const status = axios.isAxiosError(error) ? error.status : undefined;
       if (!is_retry && status === 403) {
         // This error code is returned if the ID token is expired
-        // Refresh the ID token
-        await this.openid_session.refreshToken();
-        // Retry the call
-        return await this._refreshToken(true);
+        // Refresh the ID token, then retry the call
+        const refreshed = await this.openid_session.refreshToken();
+        return refreshed.isErr() ? refreshed : await this._refreshToken(true);
       }
       this.log.error('Failed to query Astarte token:', status, (error as Error).message);
       this.id_token = undefined;
-      throw new NetworkServiceError;
+      return err(new NetworkServiceError);
     }
 
-    const parsed_response = ResponseFormat.safeParse(response.data);
+    const parsed_response = ResponseFormat.safeParse(response.value.data);
     if (!parsed_response.success) {
-      this.log.error('Failed to parse the Astarte token response:', parsed_response.error, 'Received:', toRedactedJSON(response.data));
-      throw new UnknownResponseError;
+      this.log.error('Failed to parse the Astarte token response:', parsed_response.error, 'Received:', toRedactedJSON(response.value.data));
+      return err(new UnknownResponseError);
     }
     if (this.devices === undefined) {
       this.devices = [];
@@ -166,47 +174,50 @@ export class Astarte {
       }
     }
     this.id_token = parsed_response.data.data.hoods.token;
+    return ok();
   }
 
   private async _doRequest(
-    device_id: string, api_interface: string, method: string, value: Record<string, unknown>, is_retry: boolean = false): Promise<unknown> {
+    device_id: string, api_interface: string, method: string, value: Record<string, unknown>, is_retry: boolean = false,
+  ): Promise<Result<unknown, NetworkServiceError>> {
     const headers: Record<string,string> = { 'Authorization': `Bearer ${this.id_token!}` };
-    try {
-      const response = await this.api_request({
+    const response = await ResultAsync.fromPromise(
+      this.api_request({
         url: `${ASTARTE_API_ENDPOINT}/${ASTARTE_REALM}/devices/${device_id}/interfaces/${api_interface}`,
         method: method,
         headers: headers,
-        data: value });
-      return response.data;
-    } catch (error) {
+        data: value }),
+      (error) => error);
+    if (response.isErr()) {
+      const error = response.error;
       const status = axios.isAxiosError(error) ? error.status : undefined;
       if (!is_retry && status === 403) {
         // This error is returned if the Astarte ID token is expired
-        // Refresh the ID token
-        await this.refreshToken();
-        // Retry the call
-        return await this._doRequest(device_id, api_interface, method, value, true);
+        // Refresh the ID token, then retry the call
+        const refreshed = await this.refreshToken();
+        return refreshed.isErr() ? refreshed : await this._doRequest(device_id, api_interface, method, value, true);
       }
       this.log.error('Failed to query Astarte', api_interface, status, (error as Error).message);
-      throw new NetworkServiceError;
+      return err(new NetworkServiceError);
     }
+    return ok(response.value.data);
   }
 
   /**
    * Perform an Astarte API request
-   * 
+   *
    * @param device_id The device ID, as returned from `getDevices()`
    * @param api_interface The actual API path for the request
    * @param method GET/POST/etc.
    * @param value Optional. Can be an empty record if no data accompanies this request
-   * @returns 
-   * 
-   * @throws {UnknownResponseError} If we somehow failed to parse a response from the Astarte service
-   * @throws {TokenExpiredError} If all avenues for fetching a new ID token have expired
-   * @throws {NetworkServiceError} If a temporary network issue prevented us from reaching the Astarte service
+   * @returns The response's data, or an error:
+   * - `TokenExpiredError` if all avenues for fetching a new ID token have expired
+   * - `UnknownResponseError` if we somehow failed to parse a response from the Astarte service
+   * - `NetworkServiceError` if a temporary network issue prevented us from reaching the Astarte service
    */
-  public async doRequest(device_id: string, api_interface: string, method: AstarteRequestMethod, value: Record<string, unknown>) {
-    return await this._doRequest(device_id, api_interface, method, value, false);
+  public doRequest(device_id: string, api_interface: string, method: AstarteRequestMethod, value: Record<string, unknown>)
+    : ResultAsync<unknown, NetworkServiceError> {
+    return new ResultAsync(this._doRequest(device_id, api_interface, method, value, false));
   }
 
   /**
@@ -219,30 +230,36 @@ export class Astarte {
 
   /**
    * Initialize the connection to the Astarte service
-   * 
-   * @throws {UnknownResponseError} If we somehow failed to parse a response from the Astarte service
-   * @throws {TokenExpiredError} If all avenues for fetching a new ID token have expired
-   * @throws {NetworkServiceError} If a temporary network issue prevented us from reaching the Astarte service
+   *
+   * @returns An error if that failed:
+   * - `StorageError` if the persisted tokens couldn't be read or written
+   * - `TokenExpiredError` if all avenues for fetching a new ID token have expired
+   * - `UnknownResponseError` if we somehow failed to parse a response from the Astarte service
+   * - `NetworkServiceError` if a temporary network issue prevented us from reaching the Astarte service
    */
-  public async init() {
+  public async init(config: PluginConfig): Promise<Result<void, StorageError | NetworkServiceError>> {
+    const auth_cfg_hash = this.getAuthConfigHash(config);
+
     let persisted_auth_data = await this.object_store.getTokenData();
-    const auth_cfg_hash = this.getAuthConfigHash();
-    if (!persisted_auth_data || (persisted_auth_data && (auth_cfg_hash !== persisted_auth_data.hashed_auth_cfg))) {
-      // The user changed the auth config, so clear out our cached refresh and ID tokens
-      await this.object_store.setTokenData({ hashed_auth_cfg: auth_cfg_hash, id_token: '', refresh_token: '' });
-      persisted_auth_data = await this.object_store.getTokenData();
+    if (persisted_auth_data.isOk() && persisted_auth_data.value?.hashed_auth_cfg !== auth_cfg_hash) {
+      // The user changed the auth config (or there's nothing persisted yet), so clear out our cached refresh and ID tokens
+      persisted_auth_data = await this.object_store.setTokenData({ hashed_auth_cfg: auth_cfg_hash, id_token: '', refresh_token: '' })
+        .andThen(() => this.object_store.getTokenData());
     }
-    if (persisted_auth_data.id_token) {
-      this.openid_session.setIdToken(persisted_auth_data.id_token);
-      this.openid_session.setRefreshToken(persisted_auth_data.refresh_token);
+    if (persisted_auth_data.isErr()) {
+      return err(persisted_auth_data.error);
+    }
+
+    if (persisted_auth_data.value?.id_token) {
+      this.openid_session.setIdToken(persisted_auth_data.value.id_token);
+      this.openid_session.setRefreshToken(persisted_auth_data.value.refresh_token);
     } else {
-      if (this.config.auth_mode === 'token') {
-        this.openid_session.setRefreshToken(this.config.refresh_token);
-      } else {
-        throw new InvalidConfigError(`Unhandled auth mode: ${this.config.auth_mode}`);
+      this.openid_session.setRefreshToken(config.refresh_token);
+      const refreshed = await this.openid_session.refreshToken();
+      if (refreshed.isErr()) {
+        return refreshed;
       }
-      await this.openid_session.refreshToken();
     }
-    await this.refreshToken();
+    return await this.refreshToken();
   }
 }
