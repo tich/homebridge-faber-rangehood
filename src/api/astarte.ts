@@ -57,7 +57,7 @@ export class Astarte {
     return MD5(auth_cfg_str);
   }
 
-  private async fetchUserId(is_retry: boolean = false) {
+  private async fetchUserId(is_retry: boolean = false): Promise<void> {
     if (this.user_id !== undefined) {
       // Already done.
       return;
@@ -73,32 +73,32 @@ export class Astarte {
       }),
     });
 
-    await this.auth_request
-      .get(`${ASTARTE_USER_INFO_ENDPOINT}/${ASTARTE_REALM}`,
-        { headers: { 'sso-token': this.openid_session.getIdToken() } })
-      .then((response) => {
-        const parsed_response = ResponseFormat.safeParse(response.data);
-        if (parsed_response.success) {
-          this.user_id = parsed_response.data.data.user_id;
-        } else {
-          this.log.error('Failed to parse the Astarte user info response:', parsed_response.error, 'Received:', JSON.stringify(response.data));
-          throw new UnknownResponseError;
-        }
-      }).catch(async (error) => {
-        if (!is_retry && error.status === 403) {
-          // This error code is returned if the ID token is expired
-          // Refresh the ID token
-          await this.openid_session.refreshToken();
-          // Retry the call
-          await this.fetchUserId(true);
-        } else {
-          this.log.error('Failed to query Astarte user info:', error.status, error.message);
-          throw new NetworkServiceError;
-        }
-      });
+    let response;
+    try {
+      response = await this.auth_request.get(`${ASTARTE_USER_INFO_ENDPOINT}/${ASTARTE_REALM}`,
+        { headers: { 'sso-token': this.openid_session.getIdToken() } });
+    } catch (error) {
+      const status = axios.isAxiosError(error) ? error.status : undefined;
+      if (!is_retry && status === 403) {
+        // This error code is returned if the ID token is expired
+        // Refresh the ID token
+        await this.openid_session.refreshToken();
+        // Retry the call
+        return await this.fetchUserId(true);
+      }
+      this.log.error('Failed to query Astarte user info:', status, (error as Error).message);
+      throw new NetworkServiceError;
+    }
+
+    const parsed_response = ResponseFormat.safeParse(response.data);
+    if (!parsed_response.success) {
+      this.log.error('Failed to parse the Astarte user info response:', parsed_response.error, 'Received:', JSON.stringify(response.data));
+      throw new UnknownResponseError;
+    }
+    this.user_id = parsed_response.data.data.user_id;
   }
 
-  private async refreshToken(is_retry: boolean = false) {
+  private async refreshToken(is_retry: boolean = false): Promise<void> {
     if (!this.openid_session.isValid()) {
       throw new TokenExpiredError;
     }
@@ -116,63 +116,60 @@ export class Astarte {
       }),
     });
 
-    await this.auth_request
-      .get(`${ASTARTE_TOKEN_ENDPOINT}/${ASTARTE_REALM}/users/${this.user_id!}/devices`,
-        { headers: { 'sso-token': this.openid_session.getIdToken() } })
-      .then((response) => {
-        const parsed_response = ResponseFormat.safeParse(response.data);
-        if (!parsed_response.success) {
-          this.log.error('Failed to parse the Astarte token response:', parsed_response.error, 'Received:', JSON.stringify(response.data));
-          throw new UnknownResponseError;
-        }
-        if (this.devices === undefined) {
-          this.devices = [];
-          for (const device of parsed_response.data.data.hoods.devices) {
-            this.devices.push(device.id);
-          }
-        }
-        this.id_token = parsed_response.data.data.hoods.token;
-      }).catch(async (error) => {
-        if (!is_retry && error.status === 403) {
-          // This error code is returned if the ID token is expired
-          // Refresh the ID token
-          await this.openid_session.refreshToken();
-          // Retry the call
-          await this.refreshToken(true);
-        } else {
-          this.log.error('Failed to query Astarte token:', error.status, error.message);
-          this.id_token = undefined;
-          throw new NetworkServiceError;
-        }
-      });
+    let response;
+    try {
+      response = await this.auth_request.get(`${ASTARTE_TOKEN_ENDPOINT}/${ASTARTE_REALM}/users/${this.user_id!}/devices`,
+        { headers: { 'sso-token': this.openid_session.getIdToken() } });
+    } catch (error) {
+      const status = axios.isAxiosError(error) ? error.status : undefined;
+      if (!is_retry && status === 403) {
+        // This error code is returned if the ID token is expired
+        // Refresh the ID token
+        await this.openid_session.refreshToken();
+        // Retry the call
+        return await this.refreshToken(true);
+      }
+      this.log.error('Failed to query Astarte token:', status, (error as Error).message);
+      this.id_token = undefined;
+      throw new NetworkServiceError;
+    }
+
+    const parsed_response = ResponseFormat.safeParse(response.data);
+    if (!parsed_response.success) {
+      this.log.error('Failed to parse the Astarte token response:', parsed_response.error, 'Received:', JSON.stringify(response.data));
+      throw new UnknownResponseError;
+    }
+    if (this.devices === undefined) {
+      this.devices = [];
+      for (const device of parsed_response.data.data.hoods.devices) {
+        this.devices.push(device.id);
+      }
+    }
+    this.id_token = parsed_response.data.data.hoods.token;
   }
 
-  private async _doRequest(device_id: string, api_interface: string, method: string, value: Record<string, unknown>, is_retry: boolean = false) {
+  private async _doRequest(
+    device_id: string, api_interface: string, method: string, value: Record<string, unknown>, is_retry: boolean = false): Promise<unknown> {
     const headers: Record<string,string> = { 'Authorization': `Bearer ${this.id_token!}` };
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    let returned_data: any = {};
-    await this.api_request({
-      url: `${ASTARTE_API_ENDPOINT}/${ASTARTE_REALM}/devices/${device_id}/interfaces/${api_interface}`,
-      method: method,
-      headers: headers,
-      data: value })
-      .then((response) => {
-        returned_data = response.data;
-      })
-      .catch(async (error) => {
-        if (!is_retry && error.status === 403) {
-          // This error is returned if the Astarte ID token is expired
-          // Refresh the ID token
-          await this.refreshToken();
-          // Retry the call
-          returned_data = await this._doRequest(device_id, api_interface, method, value, true);
-        } else {
-          this.log.error('Failed to query Astarte', api_interface, error.status, error.message);
-          throw new NetworkServiceError;
-        }
-      });
-
-    return returned_data;
+    try {
+      const response = await this.api_request({
+        url: `${ASTARTE_API_ENDPOINT}/${ASTARTE_REALM}/devices/${device_id}/interfaces/${api_interface}`,
+        method: method,
+        headers: headers,
+        data: value });
+      return response.data;
+    } catch (error) {
+      const status = axios.isAxiosError(error) ? error.status : undefined;
+      if (!is_retry && status === 403) {
+        // This error is returned if the Astarte ID token is expired
+        // Refresh the ID token
+        await this.refreshToken();
+        // Retry the call
+        return await this._doRequest(device_id, api_interface, method, value, true);
+      }
+      this.log.error('Failed to query Astarte', api_interface, status, (error as Error).message);
+      throw new NetworkServiceError;
+    }
   }
 
   /**

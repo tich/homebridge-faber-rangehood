@@ -100,28 +100,26 @@ export class OpenIDSession {
       id_token: zod.string(),
       refresh_token: zod.string(),
     });
-    await this.request
-      .post(OPENID_TOKEN_ENDPOINT, request_data, { params: OPENID_TOKEN_EXTRA_PARAMETERS })
-      .then((response) => {
-        const parsed_response = ResponseFormat.safeParse(response.data);
-        if (parsed_response.success) {
-          this.id_token = parsed_response.data.id_token;
-          this.refresh_token = parsed_response.data.refresh_token;
-        } else {
-          this.log.error('Failed to parse the OpenID token refresh response:', parsed_response.error, 'Received:', JSON.stringify(response.data));
-          this.refresh_token = '';
-          throw new UnknownResponseError;
-        }
-      })
-      .catch((error) => {
-        if (error.status === 400) {
-          this.refresh_token = '';
-          throw new TokenExpiredError;
-        } else {
-          this.log.error('Failed to refresh the OpenID token:', error);
-          throw new NetworkServiceError;
-        }
-      });
+    let response;
+    try {
+      response = await this.request.post(OPENID_TOKEN_ENDPOINT, request_data, { params: OPENID_TOKEN_EXTRA_PARAMETERS });
+    } catch (error) {
+      if (axios.isAxiosError(error) && error.status === 400) {
+        this.refresh_token = '';
+        throw new TokenExpiredError;
+      }
+      this.log.error('Failed to refresh the OpenID token:', error);
+      throw new NetworkServiceError;
+    }
+
+    const parsed_response = ResponseFormat.safeParse(response.data);
+    if (!parsed_response.success) {
+      this.log.error('Failed to parse the OpenID token refresh response:', parsed_response.error, 'Received:', JSON.stringify(response.data));
+      this.refresh_token = '';
+      throw new UnknownResponseError;
+    }
+    this.id_token = parsed_response.data.id_token;
+    this.refresh_token = parsed_response.data.refresh_token;
   }
 
   private emitTokenChanged(id_token: string, refresh_token: string) {
