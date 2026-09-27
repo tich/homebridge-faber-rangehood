@@ -20,6 +20,7 @@ export interface DeviceInfo {
   id: string;
   name: string;
   features: Record<string, unknown>;
+  firmware_revision?: string;
 }
 
 interface DeviceDescriptor {
@@ -50,6 +51,7 @@ export class DeviceFactory {
       throw new UnknownDeviceTypeError;
     }
     const deviceFeatures = await deviceDescriptor.handler_class.getDeviceFeatures(log, astarte, device_id);
+    const firmwareRevision = await deviceDescriptor.handler_class.getFirmwareRevision(log, astarte, device_id);
     if (!device_name) {
       device_name = deviceDescriptor.default_name;
     }
@@ -60,6 +62,7 @@ export class DeviceFactory {
       id: device_id,
       name: device_name,
       features: deviceFeatures,
+      firmware_revision: firmwareRevision,
     };
   }
 

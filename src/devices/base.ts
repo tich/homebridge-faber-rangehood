@@ -1,6 +1,7 @@
 import type { Logging, PlatformAccessory, Service } from 'homebridge';
 import type { FaberHomebridgePlatform } from '../platform.js';
 import { Astarte } from '../api/astarte.js';
+import { PLUGIN_VERSION } from '../settings.js';
 
 export class BaseDevice {
   protected readonly device_info;
@@ -14,7 +15,10 @@ export class BaseDevice {
     this.accessory.getService(this.platform.Service.AccessoryInformation)!
       .setCharacteristic(this.platform.Characteristic.Manufacturer, 'Faber')
       .setCharacteristic(this.platform.Characteristic.Model, this.device_info.model)
-      .setCharacteristic(this.platform.Characteristic.SerialNumber, this.device_info.id);
+      .setCharacteristic(this.platform.Characteristic.SerialNumber, this.device_info.id)
+      // If the device's firmware version isn't available (see `getFirmwareRevision`), report the plugin's version instead.
+      // HomeKit expects a numeric "x[.y[.z]]" version, so drop any pre-release suffix (e.g. "-beta.1")
+      .setCharacteristic(this.platform.Characteristic.FirmwareRevision, this.device_info.firmware_revision ?? PLUGIN_VERSION.split('-')[0]);
   }
 
   /**
@@ -38,5 +42,15 @@ export class BaseDevice {
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
   public static async getDeviceFeatures(log: Logging, astarte: Astarte, device_id: string) {
     return {};
+  }
+
+  /**
+   * Get the device's firmware version, in HomeKit's numeric "x[.y[.z]]" format.
+   * Device types that can retrieve it should override this. Otherwise, the plugin's version is reported instead.
+   * @returns The firmware version, or `undefined` if it isn't available
+   */
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  public static async getFirmwareRevision(log: Logging, astarte: Astarte, device_id: string): Promise<string | undefined> {
+    return undefined;
   }
 }
