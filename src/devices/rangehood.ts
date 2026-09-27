@@ -11,6 +11,25 @@ import {
   from '../api/constants.js';
 import { TokenExpiredError, UnknownResponseError } from '../lib/errors.js';
 import { mapRange } from '../lib/utils.js';
+import { ChannelWriter } from '../lib/channelwriter.js';
+
+/**
+ * The latest state HomeKit requested, or the hood reported, in HomeKit's units.
+ *
+ * HAP-NodeJS only stores a written value once its handler completes, so a handler can't read the other values
+ * written in the same HomeKit request (e.g. On + Brightness) from the characteristics. It reads them from here instead.
+ */
+interface HoodState {
+  light: {
+    on: boolean;
+    brightness: number; // Percentage
+    color_temperature: number; // Mireds
+  };
+  fan: {
+    active: boolean;
+    speed: number; // Percentage
+  };
+}
 
 export class RangeHoodDevice extends BaseDevice {
   private fan_service: Service;
@@ -19,6 +38,19 @@ export class RangeHoodDevice extends BaseDevice {
   private grease_filter_service: Service;
 
   private readonly refresh_interval_ms = 3 * 1000;
+
+  // Polling is paused while writes are in flight, so a poll can't overwrite a write with an outdated state
+  private poll_timer?: ReturnType<typeof setTimeout>;
+  private polling_stopped = false;
+  private writes_in_flight = 0;
+  // Incremented whenever a write starts, so a poll can tell that a write happened while it was in flight
+  private write_generation = 0;
+
+  private readonly state: HoodState;
+  private readonly light_writer: ChannelWriter<number>;
+  private readonly color_temperature_writer: ChannelWriter<number>;
+  private readonly fan_writer: ChannelWriter<number>;
+
   private readonly max_fan_speed: number;
   private readonly max_light_intensity: number;
   private readonly max_color_temperature_settings: number;
@@ -94,7 +126,49 @@ export class RangeHoodDevice extends BaseDevice {
     this.grease_filter_service.getCharacteristic(this.platform.Characteristic.ResetFilterIndication)
       .onSet(this.resetGreaseFilter.bind(this));
 
-    setTimeout(() => this.updateHoodStatus(), this.refresh_interval_ms);
+    // Start from the last known state, as restored from the accessory cache
+    this.state = {
+      light: {
+        on: this.light_service.getCharacteristic(this.platform.Characteristic.On).value as boolean,
+        brightness: this.light_service.getCharacteristic(this.platform.Characteristic.Brightness).value as number,
+        color_temperature: this.light_service.getCharacteristic(this.platform.Characteristic.ColorTemperature).value as number,
+      },
+      fan: {
+        active: this.fan_service.getCharacteristic(this.platform.Characteristic.Active).value === this.platform.Characteristic.Active.ACTIVE,
+        speed: this.fan_service.getCharacteristic(this.platform.Characteristic.RotationSpeed).value as number,
+      },
+    };
+
+    this.light_writer = new ChannelWriter(
+      () => this.getLightIntensity(),
+      (intensity) => this.sendControlRequest('/lights/channels/1/intensity', { data: intensity }));
+    this.color_temperature_writer = new ChannelWriter(
+      () => this.getColorTemperatureSetting(),
+      (setting) => this.sendControlRequest('/lights/channels/2/intensity', { data: setting }));
+    this.fan_writer = new ChannelWriter(
+      () => this.getFanSpeed(),
+      (speed) => this.sendControlRequest('/fan/speed', { data: speed }));
+
+    this.schedulePoll();
+  }
+
+  /**
+   * Schedule the next status poll, replacing any poll that's already scheduled
+   */
+  private schedulePoll() {
+    clearTimeout(this.poll_timer);
+    if (this.polling_stopped) {
+      return;
+    }
+    this.poll_timer = setTimeout(() => this.updateHoodStatus(), this.refresh_interval_ms);
+  }
+
+  /**
+   * A poll's result is outdated if a write is in flight, or if one started after the poll did.
+   * The write's completion schedules the next poll, so an outdated poll shouldn't schedule one itself.
+   */
+  private isPollOutdated(poll_write_generation: number) {
+    return this.writes_in_flight > 0 || poll_write_generation !== this.write_generation;
   }
 
   private propagateHapStatus(hapStatus: HAPStatus) {
@@ -150,51 +224,55 @@ export class RangeHoodDevice extends BaseDevice {
       }),
     });
   
+    const poll_write_generation = this.write_generation;
     let parsed_data = undefined;
     try {
       const data = await this.platform.astarte.doRequest(this.device_info.id, ASTARTE_INTERFACE_HOOD_STATUS, AstarteRequestMethod.GET, {});
+      if (this.isPollOutdated(poll_write_generation)) {
+        return;
+      }
       parsed_data = ResponseFormat.safeParse(data);
       if (!parsed_data.success) {
         this.platform.log.error('Failed to parse the hood status response', parsed_data.error, 'Received:', JSON.stringify(data));
         throw new UnknownResponseError;
       }
     } catch(error) {
+      if (this.isPollOutdated(poll_write_generation)) {
+        return;
+      }
       if (error instanceof TokenExpiredError || error instanceof UnknownResponseError) {
         this.propagateHapStatus(HAPStatus.SERVICE_COMMUNICATION_FAILURE);
+        this.polling_stopped = true;
       } else {
         // This sounds like a recoverable network error. No need to stop updating
-        setTimeout(() => this.updateHoodStatus(), this.refresh_interval_ms);
+        this.schedulePoll();
       }
       return;
     }
 
-    if (parsed_data!.data!.data.lights.channels[1].intensity.value > 0) {
-      this.light_service.updateCharacteristic(this.platform.Characteristic.On, true);
-      this.light_service.updateCharacteristic(this.platform.Characteristic.Brightness,
-        Math.round(mapRange(parsed_data!.data!.data.lights.channels[1].intensity.value, 0, this.max_light_intensity, 0, 100)));
-    } else {
-      this.light_service.updateCharacteristic(this.platform.Characteristic.On, false);
-      // Keep the last brightness, so turning the light back on restores it.
-      // Re-asserting it still clears any error status left behind by a failed write.
-      this.light_service.updateCharacteristic(this.platform.Characteristic.Brightness,
-        this.light_service.getCharacteristic(this.platform.Characteristic.Brightness).value!);
+    // Track the reported state, so the next writes start from it (e.g. after the hood's own buttons were used).
+    // When the light or fan is off, keep the last brightness or speed, so turning it back on restores it.
+    const light_intensity = parsed_data!.data!.data.lights.channels[1].intensity.value;
+    this.state.light.on = light_intensity > 0;
+    if (this.state.light.on) {
+      this.state.light.brightness = Math.round(mapRange(light_intensity, 0, this.max_light_intensity, 0, 100));
+    }
+    this.state.light.color_temperature = mapRange(parsed_data!.data!.data.lights.channels[2].intensity.value, 0, this.max_color_temperature_settings,
+      this.min_color_temperature_mireds, this.max_color_temperature_mireds);
+    const fan_speed = parsed_data!.data!.data.fan.speed.value;
+    this.state.fan.active = fan_speed > 0;
+    if (this.state.fan.active) {
+      this.state.fan.speed = mapRange(fan_speed, 0, this.max_fan_speed, 0, 100);
     }
 
-    this.light_service.updateCharacteristic(this.platform.Characteristic.ColorTemperature,
-      mapRange(parsed_data!.data!.data.lights.channels[2].intensity.value, 0, this.max_color_temperature_settings,
-        this.min_color_temperature_mireds, this.max_color_temperature_mireds));
-
-    if (parsed_data!.data!.data.fan.speed.value > 0) {
-      this.fan_service.updateCharacteristic(this.platform.Characteristic.Active, this.platform.Characteristic.Active.ACTIVE);
-      this.fan_service.updateCharacteristic(this.platform.Characteristic.RotationSpeed,
-        mapRange(parsed_data!.data!.data.fan.speed.value, 0, this.max_fan_speed, 0, 100));
-    } else {
-      this.fan_service.updateCharacteristic(this.platform.Characteristic.Active, this.platform.Characteristic.Active.INACTIVE);
-      // Keep the last speed, so turning the fan back on restores it.
-      // Re-asserting it still clears any error status left behind by a failed write.
-      this.fan_service.updateCharacteristic(this.platform.Characteristic.RotationSpeed,
-        this.fan_service.getCharacteristic(this.platform.Characteristic.RotationSpeed).value!);
-    }
+    // Brightness and speed are updated even when the light or fan is off: re-asserting the value
+    // still clears any error status left behind by a failed write
+    this.light_service.updateCharacteristic(this.platform.Characteristic.On, this.state.light.on);
+    this.light_service.updateCharacteristic(this.platform.Characteristic.Brightness, this.state.light.brightness);
+    this.light_service.updateCharacteristic(this.platform.Characteristic.ColorTemperature, this.state.light.color_temperature);
+    this.fan_service.updateCharacteristic(this.platform.Characteristic.Active,
+      this.state.fan.active ? this.platform.Characteristic.Active.ACTIVE : this.platform.Characteristic.Active.INACTIVE);
+    this.fan_service.updateCharacteristic(this.platform.Characteristic.RotationSpeed, this.state.fan.speed);
 
     if (parsed_data!.data!.data.filters.fc.hoursUntilReplacement.value > 0) {
       this.carbon_filter_service.updateCharacteristic(this.platform.Characteristic.FilterChangeIndication,
@@ -218,7 +296,7 @@ export class RangeHoodDevice extends BaseDevice {
       this.grease_filter_service.updateCharacteristic(this.platform.Characteristic.FilterLifeLevel, 0);
     }
 
-    setTimeout(() => this.updateHoodStatus(), this.refresh_interval_ms);
+    this.schedulePoll();
   }
 
   public static async getDeviceFeatures(log: Logging, astarte: Astarte, device_id: string) {
@@ -267,98 +345,117 @@ export class RangeHoodDevice extends BaseDevice {
     return { features: parsed_feature_data.data!.data, motor: parsed_motor_data.data!.data };
   }
 
-  private async sendControlRequest(api_interface: string, data: Record<string, unknown>) {
+  /**
+   * Hold off polling until the write completes. Any poll already in flight will discard its result.
+   * Writes can be nested; polling resumes once the outermost one completes.
+   */
+  private async pausePollingDuring(write: () => Promise<void>) {
+    this.writes_in_flight++;
+    this.write_generation++;
+    clearTimeout(this.poll_timer);
     try {
-      this.platform.log.debug('Sending:', JSON.stringify(data));
-      await this.platform.astarte.doRequest(
-        this.device_info.id,
-        ASTARTE_INTERFACE_HOOD_CONTROL + api_interface,
-        AstarteRequestMethod.POST,
-        data);
-    } catch(error) {
-      // The error has been logged already.
-      if (error instanceof TokenExpiredError || error instanceof UnknownResponseError) {
-        // These point at a problem with the account or the API rather than a network blip,
-        // so mark the whole accessory as not responding
-        this.propagateHapStatus(HAPStatus.SERVICE_COMMUNICATION_FAILURE);
+      await write();
+    } finally {
+      // Resume polling after the last write. The hood reports its new state asynchronously,
+      // so polling immediately would likely read the state from before the write
+      this.writes_in_flight--;
+      if (this.writes_in_flight === 0) {
+        this.schedulePoll();
       }
-      // Otherwise this sounds like a recoverable network error, so only this request failed.
-      // The next successful status update clears the error from the characteristic.
-      // In all cases, tell HomeKit the write failed, so the Home app doesn't show a state the hood isn't in
-      throw new this.platform.api.hap.HapStatusError(HAPStatus.SERVICE_COMMUNICATION_FAILURE);
     }
+  }
+
+  private async sendControlRequest(api_interface: string, data: Record<string, unknown>) {
+    await this.pausePollingDuring(async () => {
+      try {
+        this.platform.log.debug('Sending:', api_interface, JSON.stringify(data));
+        await this.platform.astarte.doRequest(
+          this.device_info.id,
+          ASTARTE_INTERFACE_HOOD_CONTROL + api_interface,
+          AstarteRequestMethod.POST,
+          data);
+      } catch(error) {
+        // The error has been logged already.
+        if (error instanceof TokenExpiredError || error instanceof UnknownResponseError) {
+          // These point at a problem with the account or the API rather than a network blip,
+          // so mark the whole accessory as not responding
+          this.propagateHapStatus(HAPStatus.SERVICE_COMMUNICATION_FAILURE);
+        }
+        // Otherwise this sounds like a recoverable network error, so only this request failed.
+        // The next successful status update clears the error from the characteristic.
+        // In all cases, tell HomeKit the write failed, so the Home app doesn't show a state the hood isn't in
+        throw new this.platform.api.hap.HapStatusError(HAPStatus.SERVICE_COMMUNICATION_FAILURE);
+      }
+    });
   }
 
   /**
-   * Convert a HomeKit brightness percentage to one of the hood's discrete intensity levels.
-   * Any non-zero brightness maps to at least level 1, so a low brightness doesn't turn the light off.
+   * Convert a HomeKit percentage (e.g. brightness or fan speed) to one of the hood's discrete levels.
+   * Any non-zero percentage maps to at least level 1, so a low percentage doesn't turn the light or fan off.
    */
-  private brightnessToIntensity(brightness: number) {
-    if (brightness <= 0) {
+  private percentageToLevel(percentage: number, max_level: number) {
+    if (percentage <= 0) {
       return 0;
     }
-    const intensity = Math.round(mapRange(brightness, 0, 100, 0, this.max_light_intensity));
-    return Math.max(intensity, 1);
+    return Math.max(Math.round(mapRange(percentage, 0, 100, 0, max_level)), 1);
   }
 
+  private getLightIntensity() {
+    if (!this.state.light.on) {
+      return 0;
+    }
+    // On, but the brightness can still be 0% (e.g. a new accessory, or the brightness was set to 0): use the lowest level
+    return Math.max(this.percentageToLevel(this.state.light.brightness, this.max_light_intensity), 1);
+  }
+
+  private getColorTemperatureSetting() {
+    return Math.round(mapRange(this.state.light.color_temperature,
+      this.min_color_temperature_mireds, this.max_color_temperature_mireds, 0, this.max_color_temperature_settings));
+  }
+
+  private getFanSpeed() {
+    if (!this.state.fan.active) {
+      return 0;
+    }
+    // Active, but the speed can still be 0% (e.g. a new accessory, or the speed was set to 0): use the lowest speed
+    return Math.max(this.percentageToLevel(this.state.fan.speed, this.max_fan_speed), 1);
+  }
+
+  // The handlers only record what HomeKit requested, then let the channel's writer send the resulting state.
+  // They must record it before any `await`, so that the writer sees all the writes of a HomeKit request.
+
   async setLightOn(value: CharacteristicValue) {
-    const isOn = value as boolean;
-    this.platform.log.debug('Turning light', isOn ? 'On': 'Off');
-    const configuredBrightness = this.light_service.getCharacteristic(this.platform.Characteristic.Brightness).value! as number;
-    this.platform.log.debug('Configured brightness:', configuredBrightness);
-    const intensityFromBrightness = this.brightnessToIntensity(configuredBrightness);
-    this.platform.log.debug('Intensity from brightness:', intensityFromBrightness);
-    const post_data = {
-      data: isOn ? intensityFromBrightness ? intensityFromBrightness : 1 : 0,
-    };
-    await this.sendControlRequest('/lights/channels/1/intensity', post_data);
+    this.platform.log.debug('Turning light', value ? 'On': 'Off');
+    this.state.light.on = value as boolean;
+    await this.pausePollingDuring(() => this.light_writer.write());
   }
 
   async setLightBrightness(value: CharacteristicValue) {
-    const brightness = value as number;
-    this.platform.log.debug('Setting light brightness to', brightness);
-    const intensityFromBrightness = this.brightnessToIntensity(brightness);
-    this.platform.log.debug('Intensity from brightness:', intensityFromBrightness);
-    const post_data = {
-      data: intensityFromBrightness,
-    };
-    await this.sendControlRequest('/lights/channels/1/intensity', post_data);
+    this.platform.log.debug('Setting light brightness to', value);
+    this.state.light.brightness = value as number;
+    // Setting a brightness also turns the light on (or off, for 0%)
+    this.state.light.on = this.state.light.brightness > 0;
+    await this.pausePollingDuring(() => this.light_writer.write());
   }
 
   async setColorTemperature(value: CharacteristicValue) {
-    const temperature = value as number;
-    this.platform.log.debug('Setting color temperature to', temperature);
-    const intensityFromTemperature = Math.round(mapRange(temperature,
-      this.min_color_temperature_mireds, this.max_color_temperature_mireds, 0, this.max_color_temperature_settings));
-    this.platform.log.debug('Intensity from temperature:', intensityFromTemperature);
-    const post_data = {
-      data: intensityFromTemperature,
-    };
-    await this.sendControlRequest('/lights/channels/2/intensity', post_data);
+    this.platform.log.debug('Setting color temperature to', value);
+    this.state.light.color_temperature = value as number;
+    await this.pausePollingDuring(() => this.color_temperature_writer.write());
   }
 
   async setFanActive(value: CharacteristicValue) {
-    const isOn = value as number === this.platform.Characteristic.Active.ACTIVE;
-    this.platform.log.debug('Turning fan', isOn ? 'On': 'Off');
-    const configuredSpeed = this.fan_service.getCharacteristic(this.platform.Characteristic.RotationSpeed).value! as number;
-    this.platform.log.debug('Configured speed:', configuredSpeed);
-    const intensityFromSpeed = Math.round(mapRange(configuredSpeed, 0, 100, 0, this.max_fan_speed));
-    this.platform.log.debug('Intensity from speed:', intensityFromSpeed);
-    const post_data = {
-      data: isOn ? intensityFromSpeed ? intensityFromSpeed : 1 : 0,
-    };
-    await this.sendControlRequest('/fan/speed', post_data);
+    this.platform.log.debug('Turning fan', value === this.platform.Characteristic.Active.ACTIVE ? 'On': 'Off');
+    this.state.fan.active = value === this.platform.Characteristic.Active.ACTIVE;
+    await this.pausePollingDuring(() => this.fan_writer.write());
   }
 
   async setFanSpeed(value: CharacteristicValue) {
-    const speed = value as number;
-    this.platform.log.debug('Setting fan speed to', speed);
-    const intensityFromSpeed = Math.round(mapRange(speed, 0, 100, 0, this.max_fan_speed));
-    this.platform.log.debug('Intensity from speed:', intensityFromSpeed);
-    const post_data = {
-      data: intensityFromSpeed,
-    };
-    await this.sendControlRequest('/fan/speed', post_data);
+    this.platform.log.debug('Setting fan speed to', value);
+    this.state.fan.speed = value as number;
+    // Setting a speed also turns the fan on (or off, for 0%)
+    this.state.fan.active = this.state.fan.speed > 0;
+    await this.pausePollingDuring(() => this.fan_writer.write());
   }
 
   async resetCarbonFilter(_value: CharacteristicValue) {
