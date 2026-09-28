@@ -3,6 +3,8 @@ export class UnknownDeviceTypeError extends Error {}
 export class NetworkServiceError extends Error {}
 export class UnknownResponseError extends NetworkServiceError {}
 export class TokenExpiredError extends NetworkServiceError {}
+/** The operation was given up on, since it couldn't complete within its deadline */
+export class DeadlineExceededError extends NetworkServiceError {}
 export class StorageError extends Error {}
 export class InvalidCacheError extends Error {}
 /**

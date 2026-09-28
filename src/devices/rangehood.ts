@@ -10,7 +10,7 @@ import {
   ASTARTE_INTERFACE_HOOD_MOTOR_PROPERTIES,
   ASTARTE_INTERFACE_HOOD_STATUS }
   from '../api/constants.js';
-import { InvalidCacheError, NetworkServiceError, TokenExpiredError, UnknownResponseError } from '../lib/errors.js';
+import { DeadlineExceededError, InvalidCacheError, NetworkServiceError, TokenExpiredError, UnknownResponseError } from '../lib/errors.js';
 import { mapRange } from '../lib/utils.js';
 import { ChannelWriter } from '../lib/channelwriter.js';
 import { PLUGIN_VERSION } from '../settings.js';
@@ -95,6 +95,9 @@ export class RangeHoodDevice extends BaseDevice {
   private readonly grease_filter_service?: Service;
 
   private readonly refresh_interval_ms = 3 * 1000;
+  // How long a command from HomeKit may take. HAP-NodeJS gives up on a write handler after 9 seconds,
+  // and reports a timeout instead of our error, so give up just before that.
+  private readonly write_deadline_ms = 8 * 1000;
   // While polls keep failing with network errors (e.g. during an internet outage), the interval between them
   // doubles with each failure, up to this maximum. This avoids hammering the API and flooding the logs.
   private readonly max_refresh_interval_ms = 5 * 60 * 1000;
@@ -198,13 +201,13 @@ export class RangeHoodDevice extends BaseDevice {
 
     this.light_writer = new ChannelWriter(
       () => this.getLightIntensity(),
-      (intensity) => this.sendControlRequest('/lights/channels/1/intensity', { data: intensity }));
+      (intensity, signal) => this.sendToChannel('/lights/channels/1/intensity', intensity, signal));
     this.color_temperature_writer = new ChannelWriter(
       () => this.getColorTemperatureSetting(),
-      (setting) => this.sendControlRequest('/lights/channels/2/intensity', { data: setting }));
+      (setting, signal) => this.sendToChannel('/lights/channels/2/intensity', setting, signal));
     this.fan_writer = new ChannelWriter(
       () => this.getFanSpeed(),
-      (speed) => this.sendControlRequest('/fan/speed', { data: speed }));
+      (speed, signal) => this.sendToChannel('/fan/speed', speed, signal));
 
     this.schedulePoll();
   }
@@ -451,12 +454,12 @@ export class RangeHoodDevice extends BaseDevice {
    * Hold off polling until the write completes. Any poll already in flight will discard its result.
    * Writes can be nested; polling resumes once the outermost one completes.
    */
-  private async pausePollingDuring(write: () => Promise<void>) {
+  private async pausePollingDuring<T>(write: () => Promise<T>): Promise<T> {
     this.writes_in_flight++;
     this.write_generation++;
     clearTimeout(this.poll_timer);
     try {
-      await write();
+      return await write();
     } finally {
       // Resume polling after the last write. The hood reports its new state asynchronously,
       // so polling immediately would likely read the state from before the write
@@ -467,28 +470,61 @@ export class RangeHoodDevice extends BaseDevice {
     }
   }
 
-  private async sendControlRequest(api_interface: string, data: Record<string, unknown>) {
-    await this.pausePollingDuring(async () => {
+  private async sendControlRequest(api_interface: string, data: Record<string, unknown>, signal: AbortSignal)
+    : Promise<Result<void, NetworkServiceError>> {
+    return await this.pausePollingDuring(async () => {
       this.platform.log.debug('Sending:', api_interface, JSON.stringify(data));
       const result = await this.platform.astarte.doRequest(
         this.device_info.id,
         ASTARTE_INTERFACE_HOOD_CONTROL + api_interface,
         AstarteRequestMethod.POST,
-        data);
-      if (result.isErr()) {
-        // The error has been logged already.
-        if (result.error instanceof TokenExpiredError || result.error instanceof UnknownResponseError) {
-          // These point at a problem with the account or the API rather than a network blip,
-          // so mark the whole accessory as not responding
-          this.propagateHapStatus(HAPStatus.SERVICE_COMMUNICATION_FAILURE);
-        }
-        // Otherwise this sounds like a recoverable network error, so only this request failed.
-        // The next successful status update clears the error from the characteristic.
-        // In all cases, tell HomeKit the write failed, so the Home app doesn't show a state the hood isn't in.
-        // This is where Results meet HAP-NodeJS, which expects a write handler to throw a HapStatusError
-        throw new this.platform.api.hap.HapStatusError(HAPStatus.SERVICE_COMMUNICATION_FAILURE);
+        data,
+        signal);
+      if (result.isErr() && (result.error instanceof TokenExpiredError || result.error instanceof UnknownResponseError)) {
+        // These point at a problem with the account or the API rather than a network blip,
+        // so mark the whole accessory as not responding
+        this.propagateHapStatus(HAPStatus.SERVICE_COMMUNICATION_FAILURE);
+      }
+      // Otherwise this sounds like a recoverable network error, so only this request failed.
+      // The next successful status update clears the error from the characteristic.
+      return result.map(() => undefined);
+    });
+  }
+
+  /**
+   * Convert an error into what a characteristic's write handler should throw, telling HomeKit that the write failed,
+   * so the Home app doesn't show a state the hood isn't in.
+   * This is where Results meet HAP-NodeJS, which expects a write handler to throw a HapStatusError.
+   */
+  private toHapStatusError(error: unknown) {
+    // Other errors have been logged already
+    if (error instanceof DeadlineExceededError) {
+      this.platform.log.warn('A command to', this.device_info.name, 'didn\'t complete within', this.write_deadline_ms / 1000, 'seconds');
+    }
+    return new this.platform.api.hap.HapStatusError(HAPStatus.SERVICE_COMMUNICATION_FAILURE);
+  }
+
+  /**
+   * Send a channel's latest requested state, from a characteristic's write handler
+   */
+  private async writeChannel(writer: ChannelWriter<number>) {
+    await this.pausePollingDuring(async () => {
+      try {
+        await writer.write(this.write_deadline_ms);
+      } catch (error) {
+        throw this.toHapStatusError(error);
       }
     });
+  }
+
+  /**
+   * Send a value to a channel, for a ChannelWriter, which expects a failed send to throw
+   */
+  private async sendToChannel(api_interface: string, value: number, signal: AbortSignal) {
+    const result = await this.sendControlRequest(api_interface, { data: value }, signal);
+    if (result.isErr()) {
+      throw result.error;
+    }
   }
 
   /**
@@ -531,7 +567,7 @@ export class RangeHoodDevice extends BaseDevice {
   async setLightOn(value: CharacteristicValue) {
     this.platform.log.debug('Turning light', value ? 'On': 'Off');
     this.state.light.on = value as boolean;
-    await this.pausePollingDuring(() => this.light_writer.write());
+    await this.writeChannel(this.light_writer);
   }
 
   async setLightBrightness(value: CharacteristicValue) {
@@ -539,19 +575,19 @@ export class RangeHoodDevice extends BaseDevice {
     this.state.light.brightness = value as number;
     // Setting a brightness also turns the light on (or off, for 0%)
     this.state.light.on = this.state.light.brightness > 0;
-    await this.pausePollingDuring(() => this.light_writer.write());
+    await this.writeChannel(this.light_writer);
   }
 
   async setColorTemperature(value: CharacteristicValue) {
     this.platform.log.debug('Setting color temperature to', value);
     this.state.light.color_temperature = value as number;
-    await this.pausePollingDuring(() => this.color_temperature_writer.write());
+    await this.writeChannel(this.color_temperature_writer);
   }
 
   async setFanActive(value: CharacteristicValue) {
     this.platform.log.debug('Turning fan', value === this.platform.Characteristic.Active.ACTIVE ? 'On': 'Off');
     this.state.fan.active = value === this.platform.Characteristic.Active.ACTIVE;
-    await this.pausePollingDuring(() => this.fan_writer.write());
+    await this.writeChannel(this.fan_writer);
   }
 
   async setFanSpeed(value: CharacteristicValue) {
@@ -559,7 +595,7 @@ export class RangeHoodDevice extends BaseDevice {
     this.state.fan.speed = value as number;
     // Setting a speed also turns the fan on (or off, for 0%)
     this.state.fan.active = this.state.fan.speed > 0;
-    await this.pausePollingDuring(() => this.fan_writer.write());
+    await this.writeChannel(this.fan_writer);
   }
 
   // The filter reset handlers are only registered when the hood has that filter
@@ -569,7 +605,10 @@ export class RangeHoodDevice extends BaseDevice {
     const post_data = {
       data: true,
     };
-    await this.sendControlRequest('/filters/fc/resetCountdown', post_data);
+    const result = await this.sendControlRequest('/filters/fc/resetCountdown', post_data, AbortSignal.timeout(this.write_deadline_ms));
+    if (result.isErr()) {
+      throw this.toHapStatusError(result.error);
+    }
     this.resetFilterStatus(this.carbon_filter_service!);
   }
 
@@ -578,7 +617,10 @@ export class RangeHoodDevice extends BaseDevice {
     const post_data = {
       data: true,
     };
-    await this.sendControlRequest('/filters/fg/resetCountdown', post_data);
+    const result = await this.sendControlRequest('/filters/fg/resetCountdown', post_data, AbortSignal.timeout(this.write_deadline_ms));
+    if (result.isErr()) {
+      throw this.toHapStatusError(result.error);
+    }
     this.resetFilterStatus(this.grease_filter_service!);
   }
 

@@ -5,10 +5,18 @@ import zod from 'zod';
 import { err, ok, Result, ResultAsync } from 'neverthrow';
 import { OpenIDSession } from './openid.js';
 import { ObjectStore } from '../lib/objectstore.js';
-import { NetworkServiceError, StorageError, UnknownResponseError } from '../lib/errors.js';
+import { DeadlineExceededError, NetworkServiceError, StorageError, UnknownResponseError } from '../lib/errors.js';
 import type { PluginConfig } from '../config.js';
-import { toRedactedJSON } from '../lib/utils.js';
-import { ASTARTE_API_ENDPOINT, ASTARTE_API_URL, ASTARTE_AUTH_URL, ASTARTE_REALM, ASTARTE_TOKEN_ENDPOINT, ASTARTE_USER_INFO_ENDPOINT } from './constants.js';
+import { toRedactedJSON, untilAborted } from '../lib/utils.js';
+import {
+  ASTARTE_API_ENDPOINT,
+  ASTARTE_API_URL,
+  ASTARTE_AUTH_URL,
+  ASTARTE_REALM,
+  ASTARTE_TOKEN_ENDPOINT,
+  ASTARTE_USER_INFO_ENDPOINT,
+  REQUEST_TIMEOUT_MS }
+  from './constants.js';
 
 export enum AstarteRequestMethod {
   GET = 'get',
@@ -38,11 +46,11 @@ export class Astarte {
 
     this.auth_request = axios.create({
       baseURL: ASTARTE_AUTH_URL,
-      timeout: 30 * 1000,
+      timeout: REQUEST_TIMEOUT_MS,
     });
     this.api_request  = axios.create({
       baseURL: ASTARTE_API_URL,
-      timeout: 30 * 1000,
+      timeout: REQUEST_TIMEOUT_MS,
     });
     this.api_request.defaults.headers.post['Content-Type'] = 'application/json';
   }
@@ -178,7 +186,7 @@ export class Astarte {
   }
 
   private async _doRequest(
-    device_id: string, api_interface: string, method: string, value: Record<string, unknown>, is_retry: boolean = false,
+    device_id: string, api_interface: string, method: string, value: Record<string, unknown>, signal: AbortSignal | undefined, is_retry: boolean,
   ): Promise<Result<unknown, NetworkServiceError>> {
     const headers: Record<string,string> = { 'Authorization': `Bearer ${this.id_token!}` };
     const response = await ResultAsync.fromPromise(
@@ -186,16 +194,22 @@ export class Astarte {
         url: `${ASTARTE_API_ENDPOINT}/${ASTARTE_REALM}/devices/${device_id}/interfaces/${api_interface}`,
         method: method,
         headers: headers,
-        data: value }),
+        data: value,
+        signal: signal }),
       (error) => error);
     if (response.isErr()) {
       const error = response.error;
+      if (axios.isCancel(error)) {
+        this.log.debug('Cancelled the Astarte request', api_interface, 'since its deadline passed');
+        return err(new DeadlineExceededError);
+      }
       const status = axios.isAxiosError(error) ? error.status : undefined;
       if (!is_retry && status === 403) {
         // This error is returned if the Astarte ID token is expired
-        // Refresh the ID token, then retry the call
-        const refreshed = await this.refreshToken();
-        return refreshed.isErr() ? refreshed : await this._doRequest(device_id, api_interface, method, value, true);
+        // Refresh the ID token, then retry the call. The refresh isn't cancelled if the deadline passes, since it's shared
+        // with other requests, and the next request will benefit from it. Only waiting for it is.
+        const refreshed = await untilAborted(this.refreshToken(), signal);
+        return refreshed.isErr() ? refreshed : await this._doRequest(device_id, api_interface, method, value, signal, true);
       }
       this.log.error('Failed to query Astarte', api_interface, status, (error as Error).message);
       return err(new NetworkServiceError);
@@ -210,14 +224,16 @@ export class Astarte {
    * @param api_interface The actual API path for the request
    * @param method GET/POST/etc.
    * @param value Optional. Can be an empty record if no data accompanies this request
+   * @param signal Optional. Cancels the request when it aborts (e.g. when a deadline passes)
    * @returns The response's data, or an error:
    * - `TokenExpiredError` if all avenues for fetching a new ID token have expired
    * - `UnknownResponseError` if we somehow failed to parse a response from the Astarte service
+   * - `DeadlineExceededError` if the signal aborted before the request completed
    * - `NetworkServiceError` if a temporary network issue prevented us from reaching the Astarte service
    */
-  public doRequest(device_id: string, api_interface: string, method: AstarteRequestMethod, value: Record<string, unknown>)
+  public doRequest(device_id: string, api_interface: string, method: AstarteRequestMethod, value: Record<string, unknown>, signal?: AbortSignal)
     : ResultAsync<unknown, NetworkServiceError> {
-    return new ResultAsync(this._doRequest(device_id, api_interface, method, value, false));
+    return new ResultAsync(this._doRequest(device_id, api_interface, method, value, signal, false));
   }
 
   /**

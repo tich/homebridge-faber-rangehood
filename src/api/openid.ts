@@ -3,7 +3,7 @@ import { EventEmitter } from 'node:events';
 import axios, { AxiosInstance } from 'axios';
 import zod from 'zod';
 import { err, ok, Result, ResultAsync } from 'neverthrow';
-import { OPENID_AUTH_URL, OPENID_CLIENT_ID, OPENID_TOKEN_ENDPOINT, OPENID_TOKEN_EXTRA_PARAMETERS } from './constants.js';
+import { OPENID_AUTH_URL, OPENID_CLIENT_ID, OPENID_TOKEN_ENDPOINT, OPENID_TOKEN_EXTRA_PARAMETERS, REQUEST_TIMEOUT_MS } from './constants.js';
 import { NetworkServiceError, TokenExpiredError, UnknownResponseError } from '../lib/errors.js';
 import { toRedactedJSON } from '../lib/utils.js';
 
@@ -30,7 +30,7 @@ export class OpenIDSession {
   ) {
     this.request = axios.create({
       baseURL: OPENID_AUTH_URL,
-      timeout: 30 * 1000,
+      timeout: REQUEST_TIMEOUT_MS,
     });
     this.request.defaults.headers.post['Content-Type'] = 'application/x-www-form-urlencoded';
   }

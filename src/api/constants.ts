@@ -16,3 +16,5 @@ export const ASTARTE_INTERFACE_HOOD_STATUS = 'com.faberspa.connectedhood.HoodSta
 export const ASTARTE_INTERFACE_HOOD_FEATURES = 'com.faberspa.connectedhood.Features';
 export const ASTARTE_INTERFACE_HOOD_MOTOR_PROPERTIES = 'com.faberspa.connectedhood.MotorProperties';
 export const ASTARTE_INTERFACE_HOOD_CONTROL = 'com.faberspa.connectedhood.Control';
+// A healthy response takes well under a second, so this is generous, while limiting how long a hung request blocks
+export const REQUEST_TIMEOUT_MS = 10 * 1000;
