@@ -434,9 +434,11 @@ export class RangeHoodDevice extends BaseDevice {
     ];
     for (const [path, reported] of reports) {
       // A channel written to since this poll was sent gets a poll of its own once the write completes
-      if (reported !== undefined && !this.isChannelBusy(channelOf(path)!, generations_at_fetch)) {
+      if (reported !== undefined && this.isChannelBusy(channelOf(path)!, generations_at_fetch)) {
+        this.platform.log.debug('Holding back a polled value for', path, 'during a write');
+      } else if (reported !== undefined) {
         const timestamp = reported.reception_timestamp === undefined ? undefined : Date.parse(reported.reception_timestamp);
-        this.applyReport(path, reported.value, Number.isNaN(timestamp) ? undefined : timestamp);
+        this.applyReport('poll', path, reported.value, Number.isNaN(timestamp) ? undefined : timestamp);
       }
     }
 
@@ -453,7 +455,7 @@ export class RangeHoodDevice extends BaseDevice {
       this.platform.log.debug('Holding back a push update for', event.path, 'during a write');
       return;
     }
-    this.applyReport(event.path, event.value, event.timestamp);
+    this.applyReport('push', event.path, event.value, event.timestamp);
   }
 
   private onPushActiveChange(active: boolean) {
@@ -465,21 +467,25 @@ export class RangeHoodDevice extends BaseDevice {
 
   /**
    * Apply a value the hood reported for one of its status paths, from a poll or a push event
+   * @param source Where the value came from, for the debug log
    * @param timestamp When the cloud received the value (ms since epoch). An older value than the one last applied is ignored.
    * When unknown, the value is applied regardless.
    */
-  private applyReport(path: string, value: unknown, timestamp: number | undefined) {
+  private applyReport(source: 'poll' | 'push', path: string, value: unknown, timestamp: number | undefined) {
+    const received = timestamp === undefined ? 'unknown' : new Date(timestamp).toISOString();
     if (typeof value !== 'number') {
-      this.platform.log.debug('Ignoring an unexpected value for', path + ':', JSON.stringify(value));
+      this.platform.log.debug(`Ignoring an unexpected ${source}ed value for`, path + ':', JSON.stringify(value));
       return;
     }
     if (timestamp !== undefined) {
       const last_timestamp = this.reported_at.get(path);
       if (last_timestamp !== undefined && timestamp < last_timestamp) {
+        this.platform.log.debug(`Ignoring an outdated ${source}ed value for`, path + ':', value, '(received', received + ')');
         return;
       }
       this.reported_at.set(path, timestamp);
     }
+    this.platform.log.debug(`Applying a ${source}ed value for`, path + ':', value, '(received', received + ')');
 
     // Track the reported state, so the next writes start from it (e.g. after the hood's own buttons were used).
     // When the light or fan is off, keep the last brightness or speed, so turning it back on restores it.

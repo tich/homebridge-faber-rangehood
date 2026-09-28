@@ -139,3 +139,6 @@ eslint-rules
 
 # compiled tests
 build-test
+
+# personal deployment script
+tools/deploy.sh

@@ -127,3 +127,6 @@ dist
 
 # Compiled tests
 /build-test
+
+# Personal deployment script
+/tools/deploy.sh

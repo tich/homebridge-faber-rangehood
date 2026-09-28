@@ -344,7 +344,9 @@ describe('RangeHoodDevice', () => {
       hood.push('/unknown/path', 1);
       hood.push('/lights/channels/1/intensity', 'bright');
       assert.equal(hood.value(hood.light, Characteristic.On), false);
-      assert.equal(hood.log.at('debug').length, 2);
+      const debug = hood.log.at('debug').join('\n');
+      assert.match(debug, /Ignoring a report for an unknown path: \/unknown\/path/);
+      assert.match(debug, /Ignoring an unexpected pushed value for \/lights\/channels\/1\/intensity/);
     });
 
     test('only polls as a safety net while active, after catching up', async () => {

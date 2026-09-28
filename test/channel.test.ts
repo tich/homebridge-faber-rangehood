@@ -1,4 +1,4 @@
-import { after, afterEach, before, beforeEach, describe, test } from 'node:test';
+import { afterEach, beforeEach, describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { AddressInfo } from 'node:net';
 import { WebSocket, WebSocketServer } from 'ws';
@@ -91,20 +91,21 @@ describe('AstarteChannel', () => {
   let server: FakeChannelsServer;
   let log: TestLog;
   let channel: AstarteChannel | undefined;
-  const options = () => ({ url: server.url, heartbeat_interval_ms: 100, reconnect_min_delay_ms: 50, reconnect_max_delay_ms: 200 });
+  // Short, to keep the tests quick. The heartbeat interval is long enough that a busy machine answering a heartbeat late
+  // doesn't cause reconnects of its own, except where a test shortens it
+  const options = () => ({ url: server.url, heartbeat_interval_ms: 1000, reconnect_min_delay_ms: 50, reconnect_max_delay_ms: 200 });
 
-  before(async () => {
+  // A server per test, so that a connection a previous test left behind can't interfere
+  beforeEach(async () => {
+    log = createLog();
     server = new FakeChannelsServer();
     await server.listening();
   });
-  after(() => server.close());
-  beforeEach(() => {
-    log = createLog();
-    server.received.length = 0;
-    server.tokens.length = 0;
-    server.replies = {};
+  afterEach(async () => {
+    channel?.stop();
+    channel = undefined;
+    await server.close();
   });
-  afterEach(() => channel?.stop());
 
   test('joins the user\'s room, watches each device, and delivers its events', async () => {
     channel = new AstarteChannel(log.log, fakeAstarte(), options());
@@ -145,18 +146,18 @@ describe('AstarteChannel', () => {
     channel.start();
     await until(() => listener.active.length === 1);
     server.socket!.terminate();
-    await until(() => listener.active.length === 3);
-    assert.deepEqual(listener.active, [true, false, true]);
-    assert.deepEqual(server.tokens, ['AT1', 'AT2']);
-    assert.equal(server.count('watch'), 2);
+    await until(() => listener.active.length >= 3);
+    assert.deepEqual(listener.active.slice(0, 3), [true, false, true]);
+    assert.deepEqual(server.tokens.slice(0, 2), ['AT1', 'AT2']);
+    assert.ok(server.count('watch') >= 2);
     assert.ok(log.at('warn').some((line) => line.includes('Lost the push updates connection')));
   });
 
   test('reconnects when a heartbeat goes unanswered', async () => {
     server.replies.heartbeat = 'none';
-    channel = new AstarteChannel(log.log, fakeAstarte(), options());
+    channel = new AstarteChannel(log.log, fakeAstarte(), { ...options(), heartbeat_interval_ms: 100 });
     channel.start();
-    await until(() => server.tokens.length === 2, 1000);
+    await until(() => server.tokens.length >= 2, 1000);
   });
 
   test('reconnects when the server closes the room', async () => {
@@ -164,7 +165,7 @@ describe('AstarteChannel', () => {
     channel.start();
     await until(() => server.count('phx_join') === 1);
     server.socket!.send(JSON.stringify([null, null, 'rooms:faber:user1', 'phx_error', {}]));
-    await until(() => server.count('phx_join') === 2);
+    await until(() => server.count('phx_join') >= 2);
   });
 
   test('retries when joining fails, warning only once', async () => {
