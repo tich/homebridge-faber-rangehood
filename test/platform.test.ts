@@ -5,9 +5,10 @@ import os from 'node:os';
 import path from 'node:path';
 import type { API, PlatformAccessory, PlatformConfig } from 'homebridge';
 // The HAP implementation Homebridge uses (and so its PlatformAccessory does too)
-import { Characteristic, HapStatusError, Service, uuid } from '@homebridge/hap-nodejs';
+import { AdaptiveLightingController, Characteristic, HapStatusError, Service, uuid } from '@homebridge/hap-nodejs';
 import { err, ok, Result } from 'neverthrow';
 import { FaberHomebridgePlatform } from '../src/platform.js';
+import { PLATFORM_NAME, PLUGIN_NAME } from '../src/settings.js';
 import { DeviceFactory, INFO_VERSION } from '../src/devices/factory.js';
 import { NetworkServiceError, RequestRejectedError, TokenExpiredError } from '../src/lib/errors.js';
 import { advance, createLog, flush, FULL_FEATURES, loadPlatformAccessory, TestLog, useFakeTime } from './helpers.js';
@@ -31,7 +32,7 @@ function createPlatform(config: Record<string, unknown>, options: {
   const updated: string[] = [];
   const unregistered: string[] = [];
   const api = {
-    hap: { Service, Characteristic, uuid, HapStatusError },
+    hap: { Service, Characteristic, uuid, HapStatusError, AdaptiveLightingController },
     platformAccessory: PlatformAccessoryClass,
     user: { storagePath: () => options.storage_path! },
     on: (event: string, handler: () => unknown) => handlers[event] = handler,
@@ -44,6 +45,9 @@ function createPlatform(config: Record<string, unknown>, options: {
 
   for (const [id, device] of Object.entries(options.cached ?? {})) {
     const accessory = new PlatformAccessoryClass(`Cached ${id}`, uuid.generate(id));
+    // As Homebridge records for the accessories it caches
+    accessory._associatedPlugin = PLUGIN_NAME;
+    accessory._associatedPlatform = PLATFORM_NAME;
     accessory.context.device = device;
     platform.configureAccessory(accessory);
   }
@@ -255,22 +259,24 @@ describe('FaberHomebridgePlatform', () => {
       await launch();
       const fanName = () => cachedAccessory('PIN1').getService(Service.Fanv2)!.getCharacteristic(Characteristic.ConfiguredName);
       fanName().setValue('Extractor'); // Renamed in the Home app
-      const cached = cachedAccessory('PIN1');
+      // Restarting loads the accessory from Homebridge's cache
+      let saved = PlatformAccessoryClass.serialize(cachedAccessory('PIN1'));
       fixture!.shutdown();
 
       // Restart, with the same config: the Home app's name stays
       ({ launch, cachedAccessory } = create({ ...CONFIG, devices: [{ id: 'PIN1', name: 'Hood' }] }));
-      fixture!.platform.configureAccessory(cached);
+      fixture!.platform.configureAccessory(PlatformAccessoryClass.deserialize(saved));
       await launch();
       assert.equal(fanName().value, 'Extractor');
+      saved = PlatformAccessoryClass.serialize(cachedAccessory('PIN1'));
       fixture!.shutdown();
 
       // Restart, renamed in the config: the config's name wins
       ({ launch, cachedAccessory } = create({ ...CONFIG, devices: [{ id: 'PIN1', name: 'Kitchen Hood' }] }));
-      fixture!.platform.configureAccessory(cached);
+      fixture!.platform.configureAccessory(PlatformAccessoryClass.deserialize(saved));
       await launch();
       assert.equal(fanName().value, 'Kitchen Hood Fan');
-      assert.equal(cached.displayName, 'Kitchen Hood');
+      assert.equal(cachedAccessory('PIN1').displayName, 'Kitchen Hood');
       assert.match(fixture!.log.at('info').join(), /Renaming "Hood" to "Kitchen Hood"/);
     });
   });

@@ -1,4 +1,4 @@
-import { CharacteristicValue, HAPStatus, Logging, PlatformAccessory, Service } from 'homebridge';
+import { AdaptiveLightingController, CharacteristicValue, HAPStatus, Logging, PlatformAccessory, Service } from 'homebridge';
 import zod from 'zod';
 import { err, ok, Result } from 'neverthrow';
 import { FaberHomebridgePlatform } from '../platform.js';
@@ -157,6 +157,12 @@ export class RangeHoodDevice extends BaseDevice {
   private readonly reported_at = new Map<string, number>();
 
   private readonly state: HoodState;
+  // The color temperature setting the hood is known to be at: last reported, or last sent successfully.
+  // Unlike `state`, which holds what was requested, even if sending it failed
+  private hood_color_temperature_setting?: number;
+  // Adjusts the color temperature through the day, once Adaptive Lighting is turned on in the Home app.
+  // Only when the hood's color temperature is adjustable. See `setColorTemperature`
+  private readonly adaptive_lighting?: AdaptiveLightingController;
   private readonly light_writer: ChannelWriter<number>;
   private readonly color_temperature_writer: ChannelWriter<number>;
   private readonly fan_writer: ChannelWriter<number>;
@@ -171,8 +177,6 @@ export class RangeHoodDevice extends BaseDevice {
     accessory: PlatformAccessory,
   ) {
     super(platform, accessory);
-
-    // TODO Adaptive Lighting support? https://github.com/homebridge-plugins/homebridge-meross/blob/latest/lib/device/light-cct.js#L97
 
     // The features were validated when the device info was built (see `getDeviceFeatures` and `parseCachedFeatures`)
     this.capabilities = RangeHoodDevice.getCapabilities(this.device_info.features as HoodFeatures);
@@ -202,6 +206,8 @@ export class RangeHoodDevice extends BaseDevice {
             // Snap the slider to the hood's discrete color temperature settings
             minStep: (this.max_color_temperature_mireds - this.min_color_temperature_mireds) / this.capabilities.max_color_temperature_setting,
           });
+        this.adaptive_lighting = new this.platform.api.hap.AdaptiveLightingController(this.light_service);
+        this.accessory.configureController(this.adaptive_lighting);
       } else if (this.light_service.testCharacteristic(this.platform.Characteristic.ColorTemperature)) {
         this.platform.log.info('Removing the unsupported light color temperature from', this.device_info.name);
         this.light_service.removeCharacteristic(this.light_service.getCharacteristic(this.platform.Characteristic.ColorTemperature));
@@ -250,7 +256,10 @@ export class RangeHoodDevice extends BaseDevice {
       (intensity, signal) => this.sendToChannel('/lights/channels/1/intensity', intensity, signal));
     this.color_temperature_writer = new ChannelWriter(
       () => this.getColorTemperatureSetting(),
-      (setting, signal) => this.sendToChannel('/lights/channels/2/intensity', setting, signal));
+      async (setting, signal) => {
+        await this.sendToChannel('/lights/channels/2/intensity', setting, signal);
+        this.hood_color_temperature_setting = setting;
+      });
     this.fan_writer = new ChannelWriter(
       () => this.getFanSpeed(),
       (speed, signal) => this.sendToChannel('/fan/speed', speed, signal));
@@ -504,6 +513,14 @@ export class RangeHoodDevice extends BaseDevice {
       break;
     case '/lights/channels/2/intensity':
       if (this.light_service && this.capabilities.max_color_temperature_setting !== undefined) {
+        // A setting other than the one known to be the hood's was set on the hood itself (or in the Faber app),
+        // which HAP-NodeJS can't detect by itself. Like changing it in the Home app, that turns Adaptive Lighting off
+        if (this.adaptive_lighting?.isAdaptiveLightingActive() && this.hood_color_temperature_setting !== undefined
+          && value !== this.hood_color_temperature_setting) {
+          this.platform.log.info('Turning Adaptive Lighting off for', this.device_info.name + ', since its light color was changed');
+          this.adaptive_lighting.disableAdaptiveLighting();
+        }
+        this.hood_color_temperature_setting = value;
         this.state.light.color_temperature = mapRange(value, 0, this.capabilities.max_color_temperature_setting,
           this.min_color_temperature_mireds, this.max_color_temperature_mireds);
         this.light_service.updateCharacteristic(this.platform.Characteristic.ColorTemperature, this.state.light.color_temperature);
@@ -709,10 +726,22 @@ export class RangeHoodDevice extends BaseDevice {
     await this.writeChannel('light', this.light_writer);
   }
 
-  async setColorTemperature(value: CharacteristicValue) {
-    this.platform.log.debug('Setting color temperature to', value);
+  async setColorTemperature(value: CharacteristicValue, context?: unknown) {
     this.state.light.color_temperature = value as number;
+    const setting = this.getColorTemperatureSetting();
+    // Adaptive Lighting sets the color temperature every minute, even while the light is off. Only send what changes the
+    // hood's setting (it has only a few), and wait for the light to be on, in case setting it turns the light on.
+    // Once on, the next adjustment sends the setting
+    if (this.isFromAdaptiveLighting(context) && (!this.state.light.on || setting === this.hood_color_temperature_setting)) {
+      return;
+    }
+    this.platform.log.debug('Setting color temperature to', value);
     await this.writeChannel('color_temperature', this.color_temperature_writer);
+  }
+
+  private isFromAdaptiveLighting(context: unknown) {
+    return this.adaptive_lighting !== undefined && typeof context === 'object' && context !== null
+      && 'controller' in context && context.controller === this.adaptive_lighting;
   }
 
   async setFanActive(value: CharacteristicValue) {

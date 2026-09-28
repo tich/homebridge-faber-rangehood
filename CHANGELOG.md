@@ -1,6 +1,12 @@
 # Changelog
 
-## 3.0.2
+## 3.1.0
+
+### New
+
+- Adaptive Lighting, for hoods whose light color is adjustable: turn it on in the light's settings in the Home app, and HomeKit adjusts the color through the day. The hood only has a few color settings, so the color changes in steps. Changing the color on the hood turns Adaptive Lighting off, like changing it in the Home app does
+
+### Other changes
 
 - The plugin's settings page in the Homebridge UI links to the README's instructions for getting the refresh token and device IDs
 

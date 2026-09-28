@@ -2,7 +2,7 @@ import { afterEach, before, beforeEach, describe, mock, test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { PlatformAccessory } from 'homebridge';
 // The HAP implementation Homebridge uses (and so its PlatformAccessory does too)
-import { Characteristic, HAPStatus, HapStatusError, Service, uuid } from '@homebridge/hap-nodejs';
+import { AdaptiveLightingController, Characteristic, HAPStatus, HapStatusError, Service, uuid } from '@homebridge/hap-nodejs';
 import { err, ok } from 'neverthrow';
 import { RangeHoodDevice } from '../src/devices/rangehood.js';
 import type { ChannelEvent, ChannelListener } from '../src/api/channel.js';
@@ -67,7 +67,10 @@ function createHood(options: { features?: object; accessory?: PlatformAccessory 
 
   let listener: ChannelListener | undefined;
   const channel = { watch: (_device_id: string, _interface: string, l: ChannelListener) => listener = l };
-  const platform = { Service, Characteristic, log: log.log, astarte, channel, fallback_poll_interval_ms: 300 * 1000, api: { hap: { HapStatusError } } };
+  const platform = {
+    Service, Characteristic, log: log.log, astarte, channel, fallback_poll_interval_ms: 300 * 1000,
+    api: { hap: { HapStatusError, AdaptiveLightingController } },
+  };
 
   const accessory = options.accessory ?? new PlatformAccessoryClass('Hood', uuid.generate(`hood-${Math.random()}`));
   accessory.context.device = { info_version: INFO_VERSION, model: 'STRATUS ISOLA', astarte_type: 'HOOD', id: 'PIN1', name: 'Hood',
@@ -109,6 +112,7 @@ describe('RangeHoodDevice', () => {
     hood?.device.shutdown();
     hood = undefined;
     mock.timers.reset();
+    mock.restoreAll();
   });
 
   describe('services', () => {
@@ -311,6 +315,70 @@ describe('RangeHoodDevice', () => {
       await advance(200);
       assert.ok(isCommunicationFailure(reset.error));
       assert.equal(hood.value(hood.grease, Characteristic.FilterChangeIndication), Characteristic.FilterChangeIndication.CHANGE_FILTER);
+    });
+  });
+
+  describe('adaptive lighting', () => {
+    // The hood's color temperature settings 0-4 are 154, 208, 262, 316, and 370 mireds
+    const adaptiveLighting = (h: ReturnType<typeof createHood>) =>
+      (h.device as unknown as { adaptive_lighting: AdaptiveLightingController }).adaptive_lighting;
+    /** An adjustment by Adaptive Lighting, as its controller makes it */
+    const adjust = (h: ReturnType<typeof createHood>, mireds: number) =>
+      h.light!.getCharacteristic(Characteristic.ColorTemperature).handleSetRequest(mireds, undefined, { controller: adaptiveLighting(h) });
+    const colorPosts = (h: ReturnType<typeof createHood>) => h.posts.filter((post) => post.path === '/lights/channels/2/intensity');
+
+    /** A hood whose light is on, at color temperature setting 0 */
+    async function hoodWithLightOn() {
+      const h = createHood();
+      h.report('/lights/channels/1/intensity', 1);
+      await advance(3000);
+      return h;
+    }
+
+    test('is offered for a light with an adjustable color temperature', () => {
+      hood = createHood();
+      assert.ok(hood.light!.testCharacteristic(Characteristic.SupportedCharacteristicValueTransitionConfiguration));
+      hood.device.shutdown();
+      hood = createHood({ features: { features: { lights: { channels: { 1: { maxIntensity: 2 } } } }, motor: { maxFanSpeed: 3 } } });
+      assert.ok(!hood.light!.testCharacteristic(Characteristic.SupportedCharacteristicValueTransitionConfiguration));
+    });
+
+    test('only sends adjustments that change the hood\'s setting', async () => {
+      hood = await hoodWithLightOn();
+      await Promise.all([adjust(hood, 160), advance(200)]); // Still setting 0
+      assert.deepEqual(colorPosts(hood), []);
+      await Promise.all([adjust(hood, 262), advance(200)]);
+      await Promise.all([adjust(hood, 270), advance(200)]); // Still setting 2
+      assert.deepEqual(colorPosts(hood).map((post) => post.value), [2]);
+    });
+
+    test('doesn\'t send adjustments while the light is off, then sends the next one once it\'s on', async () => {
+      hood = createHood();
+      await advance(3000);
+      await Promise.all([adjust(hood, 262), advance(200)]);
+      assert.deepEqual(colorPosts(hood), []);
+      hood.push('/lights/channels/1/intensity', 1);
+      await Promise.all([adjust(hood, 262), advance(200)]);
+      assert.deepEqual(colorPosts(hood).map((post) => post.value), [2]);
+    });
+
+    test('still sends every color temperature set in the Home app', async () => {
+      hood = await hoodWithLightOn();
+      await Promise.all([hood.device.setColorTemperature(154), advance(200)]); // Already setting 0
+      assert.deepEqual(colorPosts(hood).map((post) => post.value), [0]);
+    });
+
+    test('is turned off when the color temperature is changed on the hood, but not by its own adjustments', async () => {
+      hood = await hoodWithLightOn();
+      const controller = adaptiveLighting(hood);
+      mock.method(controller, 'isAdaptiveLightingActive', () => true);
+      const disable = mock.method(controller, 'disableAdaptiveLighting', () => {});
+      await Promise.all([adjust(hood, 262), advance(200)]);
+      hood.push('/lights/channels/2/intensity', 2); // The hood reporting the adjustment
+      assert.equal(disable.mock.callCount(), 0);
+      hood.push('/lights/channels/2/intensity', 3); // Changed on the hood
+      assert.equal(disable.mock.callCount(), 1);
+      assert.match(hood.log.at('info').join(), /Turning Adaptive Lighting off for Hood/);
     });
   });
 

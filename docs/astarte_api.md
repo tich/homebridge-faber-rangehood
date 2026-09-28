@@ -625,6 +625,8 @@ Events are sent to every client in the room, including the ones that didn't inst
 
 The paths are those of the Hood Status interface, e.g. `/lights/channels/1/intensity` and `/fan/speed` (the ones seen so far). Only the values that changed are reported.
 
+The hood reports each change of its light's color temperature (`/lights/channels/2/intensity`) twice, as two separate values received within a millisecond or so of each other (sometimes within the same millisecond), so each one also arrives as its own event. Other changes, e.g. of the light's brightness, are reported once.
+
 The event's `timestamp` is when the cloud received the value, the same as the `reception_timestamp` the device status request returns for it. For example, a fan speed change arrived as an event with the timestamp `2026-09-28T03:10:43.554Z`, and the next status request returned that value with the same `reception_timestamp`. (The device doesn't send times of its own: the status's `timestamp` and `reception_timestamp` are always equal.) So the two can be compared to tell which value is more recent.
 
 The token only matters when connecting: the server doesn't close the connection once its token expires (after 60 minutes). It keeps answering heartbeats, and events keep arriving. (Verified in September 2026: a connection was still receiving events within a second, more than an hour after connecting.)
