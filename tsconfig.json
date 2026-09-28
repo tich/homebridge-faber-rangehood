@@ -13,7 +13,10 @@
     "sourceMap": true,
     "allowSyntheticDefaultImports": true,
     "esModuleInterop": true,
-    "forceConsistentCasingInFileNames": true
+    "forceConsistentCasingInFileNames": true,
+    // Don't type-check dependencies' declarations: Homebridge 2's Matter packages rely on browser (DOM) types,
+    // which this Node-only plugin deliberately doesn't include
+    "skipLibCheck": true
   },
   "include": [
     "src"

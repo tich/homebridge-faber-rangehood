@@ -1,7 +1,8 @@
 import { afterEach, before, beforeEach, describe, mock, test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { PlatformAccessory } from 'homebridge';
-import { Characteristic, HAPStatus, HapStatusError, Service, uuid } from 'hap-nodejs';
+// The HAP implementation Homebridge uses (and so its PlatformAccessory does too)
+import { Characteristic, HAPStatus, HapStatusError, Service, uuid } from '@homebridge/hap-nodejs';
 import { err, ok } from 'neverthrow';
 import { RangeHoodDevice } from '../src/devices/rangehood.js';
 import type { ChannelEvent, ChannelListener } from '../src/api/channel.js';

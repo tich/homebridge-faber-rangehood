@@ -81,6 +81,19 @@ The response will look like this:
 > "Authorization": "Bearer <Astarte API Token>"
 > ```
 
+The Astarte API token is a JWT that's valid for 60 minutes. Its claims say what it allows:
+```
+{
+    "a_aea": [".*::devices/<device_id>.*"],
+    "a_ch": ["JOIN::<user_id>", "WATCH::<device_id>.*"],
+    "exp": ...,
+    "iat": ...,
+    "iss": ...
+}
+```
+
+`a_aea` allows any App Engine API request about the user's devices. `a_ch` allows receiving their updates in real time, see [Real-time Updates](#real-time-updates-astarte-channels).
+
 # Device General Status
 
 This is a generic Astarte App Engine endpoint. It seems to retrieve Astarte connection information for a given device. This information isn't very useful for the homebridge plugin other than the fact that it seems to enumerate all the suported Astarte interfaces.
@@ -535,3 +548,77 @@ This is the interface that allows us to control the hood (e.g. turn on/off the l
     "data": 1
 }
 ```
+
+# Real-time Updates (Astarte Channels)
+
+> Unlike the rest of this document, this wasn't found in a packet capture of the Faber Cloud app, but verified by experiment (September 2026)
+
+Astarte App Engine can push a device's updates as they happen, over a WebSocket, using [Astarte Channels](https://docs.astarte-platform.org/astarte/latest/052-using_channels.html). The Astarte API token allows it for the user's devices (see its `a_ch` claim above). Updates arrive within about a second of the hood reporting them, e.g. after pressing its buttons, so the plugin uses them rather than frequently polling the Hood Status interface.
+
+## Connecting
+
+```
+wss://api-astarte.cloud.faberspa.com/appengine/v1/socket/websocket?vsn=2.0.0&realm=faber&token=<Astarte API Token>
+```
+
+The protocol is that of [Phoenix channels](https://hexdocs.pm/phoenix/channels.html), version 2: each message is a JSON array of `[join_ref, ref, topic, event, payload]`. A message that expects a reply carries a `ref`, which the server's `phx_reply` repeats:
+```
+[join_ref, ref, topic, "phx_reply", {"status": "ok", "response": {}}]
+```
+
+The server closes idle connections, so the client sends a heartbeat every 25 seconds or so. The server replies to it like to any other message:
+```
+[null, "<ref>", "phoenix", "heartbeat", {}]
+```
+
+## Joining the user's room
+
+A room is named after the Astarte user ID (see its `JOIN::<user_id>` claim):
+```
+["1", "1", "rooms:faber:<user_id>", "phx_join", {}]
+```
+
+## Watching a device
+
+A "watch" installs a volatile trigger in the room: it only lasts as long as the connection, so it must be installed again after reconnecting. This one fires on any data the device reports on the Hood Status interface:
+```
+["1", "2", "rooms:faber:<user_id>", "watch", {
+    "name": "<any name, unique in the room>",
+    "device_id": "<device_id>",
+    "simple_trigger": {
+        "type": "data_trigger",
+        "on": "incoming_data",
+        "interface_name": "com.faberspa.connectedhood.HoodStatus",
+        "interface_major": 1,
+        "match_path": "/*",
+        "value_match_operator": "*"
+    }
+}]
+```
+
+Besides replying, the server confirms it with a `watch_added` event, whose payload repeats the watch's.
+
+## Updates
+
+Each change the device reports then arrives as a `new_event`:
+```
+[null, null, "rooms:faber:<user_id>", "new_event", {
+    "device_id": "<device_id>",
+    "timestamp": "2026-09-28T00:21:01.869Z",
+    "event": {
+        "interface": "com.faberspa.connectedhood.HoodStatus",
+        "path": "/lights/channels/1/intensity",
+        "type": "incoming_data",
+        "value": 2
+    }
+}]
+```
+
+The paths are those of the Hood Status interface, e.g. `/lights/channels/1/intensity` and `/fan/speed` (the ones seen so far). Only the values that changed are reported.
+
+The event's `timestamp` is when the cloud received the value, the same as the `reception_timestamp` the device status request returns for it. For example, a fan speed change arrived as an event with the timestamp `2026-09-28T03:10:43.554Z`, and the next status request returned that value with the same `reception_timestamp`. (The device doesn't send times of its own: the status's `timestamp` and `reception_timestamp` are always equal.) So the two can be compared to tell which value is more recent.
+
+> Open questions:
+> - Whether the server closes the connection once its token expires (after 60 minutes). Reconnecting with a new token works either way.
+> - Whether watches' names are unique per connection, or per room (i.e. whether two clients of the same user can use the same name).
+

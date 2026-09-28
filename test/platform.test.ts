@@ -4,7 +4,8 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import type { API, PlatformAccessory, PlatformConfig } from 'homebridge';
-import { Characteristic, HapStatusError, Service, uuid } from 'hap-nodejs';
+// The HAP implementation Homebridge uses (and so its PlatformAccessory does too)
+import { Characteristic, HapStatusError, Service, uuid } from '@homebridge/hap-nodejs';
 import { err, ok, Result } from 'neverthrow';
 import { FaberHomebridgePlatform } from '../src/platform.js';
 import { DeviceFactory, INFO_VERSION } from '../src/devices/factory.js';
