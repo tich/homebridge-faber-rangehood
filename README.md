@@ -62,18 +62,21 @@ The plugin keeps its login to the Faber cloud up to date by itself, so you only 
 
 ## Running get_token.py
 
-1. Clone this repository (or download it from github)
-2. Install the `oidc-client` [Python module](https://pypi.org/project/oidc-client/) (e.g. `pip3 install oidc-client`)
-3. In your favorite terminal, run the script under `tools/get_token.py`
-4. This should open up your web browser to the Franke/Faber login page
-5. Login using your regular credentials
-6. Your web browser might ask you to allow redirecting to `FaberRedirectHandler.app` (or allow opening a link in an external handler). This is a custom handler that's dynamically created by the script itself. Click "Allow"
-7. Switch back to your terminal
-8. The script should've printed out a refresh token, and a list of the devices associated with your account
+`get_token.py` needs Python 3.9 or later, and a computer with a web browser (it doesn't need to be the one Homebridge runs on). It doesn't need any other packages, or admin rights.
+
+1. Download [`tools/get_token.py`](tools/get_token.py) from this repository (or clone it)
+2. In your favorite terminal, run it: `python3 get_token.py`
+3. This should open up your web browser to the Franke/Faber login page
+4. Login using your regular credentials
+5. Your web browser might ask you to allow redirecting to `FaberRedirectHandler.app` (or allow opening a link in an external handler). This is a custom handler that's dynamically created by the script itself, and removed once it's done. Click "Allow"
+6. Switch back to your terminal. The script lists the range hoods in your Faber account, and prints the plugin config for them, with your refresh token
+7. In the Homebridge UI, open the plugin's JSON config (from the plugin's menu), replace its contents with the printed config, and save. To name a hood in the Home app, add a `"name"` next to its `"id"`
+
+If you don't log in within 5 minutes, the script gives up; just run it again.
 
 ### Troubleshooting get_token.py
 
-- If you get an error that looks like `urlopen error [SSL: CERTIFICATE_VERIFY_FAILED]`, then try installing the `pip-system-certs` Python package (e.g. `pip3 install pip-system-certs`)
+- If you get an error that looks like `urlopen error [SSL: CERTIFICATE_VERIFY_FAILED]`, Python can't find your system's certificates. On macOS, with Python from python.org, run the `Install Certificates.command` in your Python's folder under Applications. Otherwise, try installing the `pip-system-certs` Python package (e.g. `pip3 install pip-system-certs`)
 
 # Troubleshooting
 

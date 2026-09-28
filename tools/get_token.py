@@ -1,12 +1,17 @@
 #!/usr/bin/env python3
 
-import oidc_client as oidc
 from dataclasses import dataclass, fields, field
+from http import HTTPStatus
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.error import HTTPError
-from urllib.parse import urlencode
+from urllib.parse import parse_qs, urlencode, urlparse
 from urllib.request import Request, urlopen
+import base64
+import hashlib
 import json
 import plistlib
+import secrets
+import sys
 import webbrowser
 
 import platform
@@ -14,6 +19,9 @@ import os
 import shutil
 import subprocess
 import time
+
+# How long to wait for the user to log in
+LOGIN_TIMEOUT_SECONDS = 5 * 60
 
 try:
     import winreg
@@ -67,14 +75,74 @@ class State:
 class AuthorizationError(RuntimeError):
     pass
 
+class PKCESecret:
+    """A PKCE code verifier, and its challenge (https://www.rfc-editor.org/rfc/rfc7636)"""
+    challenge_method = "S256"
+
+    def __init__(self):
+        # 128 characters, the maximum length
+        self.verifier = secrets.token_urlsafe(96)
+
+    @property
+    def challenge(self) -> str:
+        digest = hashlib.sha256(self.verifier.encode()).digest()
+        return base64.urlsafe_b64encode(digest).rstrip(b"=").decode()
+
+class RedirectHandler(BaseHTTPRequestHandler):
+    """Receives the login's result: the scheme handler forwards the redirect to the Faber app here"""
+
+    def log_message(self, *args):
+        # Don't log requests to the terminal
+        pass
+
+    def do_GET(self):
+        url = urlparse(self.path)
+        if url.path not in ("", "/"):
+            # e.g. the browser asking for a favicon
+            self.send_error(HTTPStatus.NOT_FOUND)
+            return
+        query = parse_qs(url.query)
+        if query.get("state", [None])[0] != self.server.state:
+            self.server.error = AuthorizationError("The login response doesn't match this login attempt. Please try again")
+        elif "error" in query:
+            # e.g. the login was cancelled
+            reason = query.get("error_description", query["error"])[0]
+            self.server.error = AuthorizationError(f"The login failed: {reason}")
+        elif "code" not in query:
+            self.server.error = AuthorizationError("The login response has no authorization code")
+        else:
+            self.server.code = query["code"][0]
+
+        message = "Logged in" if self.server.code else "The login failed"
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Connection", "close")
+        self.end_headers()
+        self.wfile.write(f"<!doctype html><title>{message}</title><p>{message}. You can close this tab, and go back to the terminal.</p>".encode())
+
+class RedirectServer(HTTPServer):
+    """A local web server that waits for the login's result. See `RedirectHandler`"""
+
+    def __init__(self, local_redirect_uri: str):
+        url = urlparse(local_redirect_uri)
+        super().__init__((url.hostname, url.port), RedirectHandler)
+        # Ties the login's result to this login attempt
+        self.state = secrets.token_urlsafe(32)
+        self.code = None
+        self.error = None
+        # handle_request() returns after this many seconds without a request, so that the login can time out
+        self.timeout = 1
+
 class SchemeHandlerMacOS:
     def __init__(self, scheme_name: str, openid_config: OpenIDConfig):
         self._scheme_name = scheme_name
         self._openid_config = openid_config
-        self._script_path = "/Applications/FaberRedirectHandler.app"
+        # The user's own Applications folder, which doesn't need admin rights to write to, unlike /Applications
+        self._script_path = os.path.expanduser("~/Applications/FaberRedirectHandler.app")
 
     def __enter__(self):
         print(f"Installing scheme handler at {self._script_path}")
+        os.makedirs(os.path.dirname(self._script_path), exist_ok=True)
         OSA_SCRIPT_LINES = [
             "use framework \"Foundation\"",
             "use scripting additions",
@@ -95,7 +163,11 @@ class SchemeHandlerMacOS:
         for line in OSA_SCRIPT_LINES:
             lines.append("-e")
             lines.append(line)
-        subprocess.run(["osacompile", *lines, "-o", self._script_path], check=True)
+        # Its output is only worth showing if it fails: it passes on codesign's notices (e.g. "replacing existing signature")
+        compiled = subprocess.run(["osacompile", *lines, "-o", self._script_path], capture_output=True, text=True)
+        if compiled.returncode != 0:
+            print(compiled.stdout + compiled.stderr, file=sys.stderr, end="")
+            compiled.check_returncode()
         with open(plist_path, "rb") as plist_file:
             plist = plistlib.load(plist_file)
         plist["CFBundleIdentifier"] = "com.tich.AppleScript.RedirectScheme"
@@ -165,6 +237,10 @@ class SchemeHandlerLinux:
         subprocess.run(["update-desktop-database", self._script_location], check=True)
 
 class SchemeHandlerWindows:
+    # The current user's URL schemes, which don't need admin rights to change, unlike HKEY_CLASSES_ROOT's.
+    # Windows merges them into HKEY_CLASSES_ROOT
+    _CLASSES_KEY = r"Software\Classes"
+
     def __init__(self, scheme_name: str, openid_config: OpenIDConfig):
         self._scheme_name = scheme_name
         self._openid_config = openid_config
@@ -193,23 +269,25 @@ class SchemeHandlerWindows:
 
         protocol_command = f"powershell.exe -Command \"Invoke-WebRequest -Uri $('{self._openid_config.local_redirect_uri}/' + '%1'.Substring({len(self._openid_config.redirect_uri_for_request)}))\""
 
-        if self._key_exists(winreg.HKEY_CLASSES_ROOT, self._scheme_name):
-            self._delete_key_tree(winreg.HKEY_CLASSES_ROOT, self._scheme_name)
+        with winreg.CreateKey(winreg.HKEY_CURRENT_USER, self._CLASSES_KEY) as classes_key:
+            if self._key_exists(classes_key, self._scheme_name):
+                self._delete_key_tree(classes_key, self._scheme_name)
 
-        with winreg.CreateKey(winreg.HKEY_CLASSES_ROOT, self._scheme_name) as root_key:
-            winreg.SetValueEx(root_key, "", 0, winreg.REG_SZ, "URL:Faber Redirect Handler")
-            winreg.SetValueEx(root_key, "URL Protocol", 0, winreg.REG_SZ, "")
-            with winreg.CreateKey(root_key, "shell") as shell_key:
-                with winreg.CreateKey(shell_key, "open") as open_key:
-                    winreg.SetValue(open_key, "command", winreg.REG_SZ, protocol_command)
+            with winreg.CreateKey(classes_key, self._scheme_name) as root_key:
+                winreg.SetValueEx(root_key, "", 0, winreg.REG_SZ, "URL:Faber Redirect Handler")
+                winreg.SetValueEx(root_key, "URL Protocol", 0, winreg.REG_SZ, "")
+                with winreg.CreateKey(root_key, "shell") as shell_key:
+                    with winreg.CreateKey(shell_key, "open") as open_key:
+                        winreg.SetValue(open_key, "command", winreg.REG_SZ, protocol_command)
 
         return self
 
     def __exit__(self, exc_type, exc_value, exc_traceback):
         print(f"Removing scheme handler")
-        self._delete_key_tree(winreg.HKEY_CLASSES_ROOT, self._scheme_name)
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, self._CLASSES_KEY) as classes_key:
+            self._delete_key_tree(classes_key, self._scheme_name)
 
-def _open_authorization_endpoint(openid_config: OpenIDConfig, state: str, pkce_secret: oidc.pkce.PKCESecret, nonce: str):
+def _open_authorization_endpoint(openid_config: OpenIDConfig, state: str, pkce_secret: PKCESecret, nonce: str):
     """Open a web browser to the authorization URL. This allows the user to sign in securely"""
     params = {
         "client_id": openid_config.client_id,
@@ -226,7 +304,7 @@ def _open_authorization_endpoint(openid_config: OpenIDConfig, state: str, pkce_s
     url = f"{openid_config.auth_endpoint}?{urlencode(params)}"
     webbrowser.open(url)
 
-def _start_authorization_code_flow(state: State, pkce_secret: oidc.pkce.PKCESecret, nonce: str):
+def _start_authorization_code_flow(state: State, pkce_secret: PKCESecret, nonce: str):
     scheme_name = "com.faberspa.mobile.smarthood"
     if platform.system() == "Darwin":
         scheme_handler = SchemeHandlerMacOS(scheme_name, state.openid_config)
@@ -238,29 +316,30 @@ def _start_authorization_code_flow(state: State, pkce_secret: oidc.pkce.PKCESecr
         raise RuntimeError(f"Unsupported OS: {platform.system()}")
 
     with scheme_handler:
-        with oidc.oauth.redirection_server(state.openid_config.local_redirect_uri) as httpd:
+        with RedirectServer(state.openid_config.local_redirect_uri) as httpd:
             _open_authorization_endpoint(
                 openid_config=state.openid_config,
                 state=httpd.state,
                 pkce_secret=pkce_secret,
                 nonce=nonce
             )
+            print("Log in with your Faber account in the browser window that just opened. Waiting for you to log in...")
+            deadline = time.monotonic() + LOGIN_TIMEOUT_SECONDS
             while not httpd.code and not httpd.error:
+                if time.monotonic() > deadline:
+                    raise AuthorizationError(f"Gave up waiting for the login after {LOGIN_TIMEOUT_SECONDS // 60} minutes. Please run the script again")
                 httpd.handle_request()
             if httpd.error:
                 raise httpd.error
-            if not httpd.code:
-                # This should not ever be reached.
-                raise AuthorizationError("no authorization code, unknown error.")
 
     return httpd.code
 
-def _fetch_openid_token(state: State, code: str, pkce_secret: oidc.pkce.PKCESecret):
+def _fetch_openid_token(state: State, code: str, pkce_secret: PKCESecret):
     data = {
         "grant_type": "authorization_code",
         "client_id": state.openid_config.client_id,
         "code": code,
-        "code_verifier": str(pkce_secret),
+        "code_verifier": pkce_secret.verifier,
     }
     url = f"{state.openid_config.token_endpoint}?{urlencode(state.openid_config.token_extra_params)}"
     request = Request(url, data=urlencode(sorted(data.items())).encode())
@@ -300,8 +379,8 @@ def _refresh_openid_token(state: State):
         raise AuthorizationError(error.reason)
 
 def _do_openid_auth(state: State):
-    pkce_secret = oidc.pkce.PKCESecret()
-    nonce = str(oidc.pkce.PKCESecret(30))
+    pkce_secret = PKCESecret()
+    nonce = secrets.token_urlsafe(24)
     code = _start_authorization_code_flow(
         state,
         pkce_secret=pkce_secret,
@@ -355,9 +434,13 @@ def _fetch_astarte_token(state: State):
     try:
         with urlopen(request) as response:
             token_data = json.load(response)
-        while state.astarte_config.device_ids is None:
-            state.astarte_config.device_ids = [device['id'] for device in token_data["data"].get("hoods", {}).get("devices", {})]
-        state.astarte_token.token = token_data["data"]["hoods"]["token"]
+        # The account's devices are grouped by type, each with its own token. Only range hoods are supported
+        hoods = token_data["data"].get("hoods")
+        if not hoods or not hoods.get("devices"):
+            raise AuthorizationError("Your Faber account has no range hoods. Please add yours in the Faber Cloud App, and run the script again")
+        if state.astarte_config.device_ids is None:
+            state.astarte_config.device_ids = [device["id"] for device in hoods["devices"]]
+        state.astarte_token.token = hoods["token"]
         state.astarte_token.expiration = state.openid_token.not_before + state.openid_token.id_token_expires_in
     except (TypeError, KeyError) as error:
         print(json.dumps(token_data, indent=4))
@@ -392,17 +475,28 @@ def _do_astarte_request(state: State, device_id: str, interface: str, method: st
     except HTTPError as error:
         print(error)
 
-def _print_device_info(state: State):
-    print("Found devices: [")
+def _print_config(state: State):
+    """Print the range hoods found, and the plugin config for them, ready to paste into Homebridge"""
+    print("")
+    print("Range hoods in your Faber account:")
     for device_id in state.astarte_config.device_ids:
         data = _do_astarte_request(state, device_id, "com.faberspa.DeviceDetails", "GET", None)
-        print("    {")
-        print(f"        Device ID: {device_id}")
-        print(f"        Device Model: {data['data']['modelLine']}")
-        print(f"        Device Type: {data['data']['type']}")
-        print("    }")
-    print("]")
-    pass
+        model = (data or {}).get("data", {}).get("modelLine", "unknown model")
+        print(f"  {device_id}  ({model})")
+
+    config = {
+        "platform": "FaberRangeHood",
+        "name": "Faber Range Hood",
+        "auth_mode": "token",
+        "refresh_token": state.openid_token.refresh_token,
+        "devices": [{"id": device_id} for device_id in state.astarte_config.device_ids],
+    }
+    print("")
+    print("The plugin config for them is below. In the Homebridge UI, open the plugin's JSON config (from the plugin's menu),")
+    print("replace its contents with this, and save. To name a hood in the Home app, add a \"name\" next to its \"id\".")
+    print("Keep the refresh token private: it gives access to your Faber account.")
+    print("")
+    print(json.dumps(config, indent=4))
 
 """
 This is what an authorization request looks like for a web-based sign-in. Figure out if we can use that
@@ -441,14 +535,15 @@ def _main():
         )
     )
 
-    _ensure_astarte_token(state)
-    print("")
-    print("--------------")
-    print("Refresh Token:")
-    print("--------------")
-    print(state.openid_token.refresh_token)
-    print("")
-    _print_device_info(state)
+    try:
+        _ensure_astarte_token(state)
+        _print_config(state)
+    except AuthorizationError as error:
+        print(f"Error: {error}", file=sys.stderr)
+        sys.exit(1)
+    except KeyboardInterrupt:
+        print("Cancelled", file=sys.stderr)
+        sys.exit(1)
 
 if __name__ == "__main__":
     _main()

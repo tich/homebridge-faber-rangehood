@@ -1,5 +1,15 @@
 # Changelog
 
+## 3.0.1
+
+### Improvements to `get_token.py`
+
+- Prints the plugin config for the hoods in your Faber account, ready to paste into the Homebridge UI
+- No longer needs the `oidc-client` Python package, or admin rights
+- Gives up after 5 minutes if you don't log in, and reports why a login failed (e.g. when it's cancelled)
+- A Faber account without range hoods gets a clear error message
+- Updated the README's instructions for it
+
 ## 3.0.0
 
 ### Breaking changes
