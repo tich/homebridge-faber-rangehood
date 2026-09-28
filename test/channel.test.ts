@@ -27,8 +27,8 @@ class FakeChannelsServer {
   readonly received: { topic: string; event: string; payload: Record<string, unknown> }[] = [];
   readonly tokens: string[] = [];
   socket?: WebSocket;
-  // How to reply to each event: 'ok', 'error', or 'none' (don't reply)
-  replies: Record<string, 'ok' | 'error' | 'none'> = {};
+  // How to reply to each event: 'ok', 'error', 'already existing' (an error, as for a watch whose name is taken), or 'none' (don't reply)
+  replies: Record<string, 'ok' | 'error' | 'already existing' | 'none'> = {};
 
   constructor() {
     this.server.on('connection', (socket, request) => {
@@ -38,7 +38,9 @@ class FakeChannelsServer {
         const [join_ref, ref, topic, event, payload] = JSON.parse(String(data));
         this.received.push({ topic, event, payload });
         const reply = this.replies[event] ?? 'ok';
-        if (reply !== 'none') {
+        if (reply === 'already existing') {
+          socket.send(JSON.stringify([join_ref, ref, topic, 'phx_reply', { status: 'error', response: { reason: 'already existing' } }]));
+        } else if (reply !== 'none') {
           socket.send(JSON.stringify([join_ref, ref, topic, 'phx_reply', { status: reply, response: {} }]));
         }
       });
@@ -185,16 +187,32 @@ describe('AstarteChannel', () => {
 
   test('keeps other watches going when one fails', async () => {
     channel = new AstarteChannel(log.log, fakeAstarte(), options());
-    const failing = recorder();
     const working = recorder();
-    channel.watch('PIN1', 'com.faberspa.connectedhood.HoodStatus', failing);
+    const failing = recorder();
+    channel.watch('PIN1', 'com.faberspa.connectedhood.HoodStatus', working);
     channel.start();
-    await until(() => failing.active.length === 1);
+    await until(() => working.active.length === 1);
     server.replies.watch = 'error';
-    channel.watch('PIN2', 'com.faberspa.connectedhood.HoodStatus', working);
+    channel.watch('PIN2', 'com.faberspa.connectedhood.HoodStatus', failing);
     await sleep(50);
-    assert.deepEqual(working.active, []);
+    assert.deepEqual(failing.active, []);
+    assert.deepEqual(working.active, [true]);
     assert.ok(log.at('warn').some((line) => line.includes('PIN2')));
+  });
+
+  // The user's room is shared by all their clients, and so are its watches: e.g. another instance of the plugin already
+  // installed it, or this one did before reconnecting, and the server hasn't noticed the old connection is gone yet
+  test('uses a watch that already exists in the room', async () => {
+    server.replies.watch = 'already existing';
+    channel = new AstarteChannel(log.log, fakeAstarte(), options());
+    const listener = recorder();
+    channel.watch('PIN1', 'com.faberspa.connectedhood.HoodStatus', listener);
+    channel.start();
+    await until(() => listener.active.length === 1);
+    assert.deepEqual(listener.active, [true]);
+    assert.deepEqual(log.at('warn'), []);
+    server.push('/fan/speed', 2);
+    await until(() => listener.events.length === 1);
   });
 
   test('stops for good when the credentials can\'t be fixed by retrying', async () => {

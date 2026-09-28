@@ -54,6 +54,9 @@ const ReplyFormat = zod.object({
   response: zod.unknown(),
 });
 
+/** Whether an error reply's response says that a watch with that name already exists in the room */
+const isAlreadyExisting = (response: unknown) => zod.object({ reason: zod.literal('already existing') }).safeParse(response).success;
+
 const NewEventFormat = zod.object({
   device_id: zod.string(),
   timestamp: zod.string(),
@@ -186,7 +189,10 @@ export class AstarteChannel {
       value_match_operator: '*',
     };
     this.send(this.topic!, 'watch', { name, device_id: watch.device_id, simple_trigger }, (reply) => {
-      if (reply.status !== 'ok') {
+      // Watches belong to the user's room, which all their clients share, and every client in the room receives every
+      // watch's events. So a watch that already exists (e.g. installed by another instance of the plugin, or by this one
+      // before a reconnect the server hasn't noticed yet) is as good as our own: its name means it's the same watch
+      if (reply.status !== 'ok' && !isAlreadyExisting(reply.response)) {
         // The device keeps being polled frequently
         this.log.warn('Failed to receive push updates for device ID', watch.device_id + ':', JSON.stringify(reply.response));
         return;

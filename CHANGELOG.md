@@ -9,6 +9,7 @@
 ### Fixes
 
 - A Faber account without range hoods (e.g. with only other Faber devices) gets a clear error message, rather than "unexpected response"
+- Push updates are no longer treated as unavailable when the plugin runs twice on the same Faber account, or quickly reconnects. Until then, it polled the hoods every 3 seconds, and logged "Failed to receive push updates", even though they kept arriving
 
 ### Other changes
 

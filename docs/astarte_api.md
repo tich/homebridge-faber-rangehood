@@ -580,7 +580,7 @@ A room is named after the Astarte user ID (see its `JOIN::<user_id>` claim):
 
 ## Watching a device
 
-A "watch" installs a volatile trigger in the room: it only lasts as long as the connection, so it must be installed again after reconnecting. This one fires on any data the device reports on the Hood Status interface:
+A "watch" installs a volatile trigger in the room. This one fires on any data the device reports on the Hood Status interface:
 ```
 ["1", "2", "rooms:faber:<user_id>", "watch", {
     "name": "<any name, unique in the room>",
@@ -598,6 +598,13 @@ A "watch" installs a volatile trigger in the room: it only lasts as long as the 
 
 Besides replying, the server confirms it with a `watch_added` event, whose payload repeats the watch's.
 
+A watch belongs to the room, not to the connection that installed it. All of a user's clients join the same room, so:
+- A watch's name is unique in the room. Installing one whose name is taken, even from another connection, is refused with `{"status": "error", "response": {"reason": "already existing"}}`.
+- A watch stays installed after the connection that installed it leaves, as long as another client remains in the room. Presumably, a room's watches are removed once it's empty: when Homebridge restarts, the plugin installs its watch again successfully.
+- A watch is removed with `["1", "3", "rooms:faber:<user_id>", "unwatch", {"name": "<name>"}]`. The server confirms it with a `watch_removed` event. Removing a watch that doesn't exist is refused with the reason `not found`.
+
+(Verified in September 2026, with two connections of the same user.)
+
 ## Updates
 
 Each change the device reports then arrives as a `new_event`:
@@ -614,11 +621,12 @@ Each change the device reports then arrives as a `new_event`:
 }]
 ```
 
+Events are sent to every client in the room, including the ones that didn't install a watch, once for each watch that matched. For example, with two watches for the same device and interface, every client receives each event twice.
+
 The paths are those of the Hood Status interface, e.g. `/lights/channels/1/intensity` and `/fan/speed` (the ones seen so far). Only the values that changed are reported.
 
 The event's `timestamp` is when the cloud received the value, the same as the `reception_timestamp` the device status request returns for it. For example, a fan speed change arrived as an event with the timestamp `2026-09-28T03:10:43.554Z`, and the next status request returned that value with the same `reception_timestamp`. (The device doesn't send times of its own: the status's `timestamp` and `reception_timestamp` are always equal.) So the two can be compared to tell which value is more recent.
 
 > Open questions:
 > - Whether the server closes the connection once its token expires (after 60 minutes). Reconnecting with a new token works either way.
-> - Whether watches' names are unique per connection, or per room (i.e. whether two clients of the same user can use the same name).
 
