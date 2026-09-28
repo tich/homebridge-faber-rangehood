@@ -254,6 +254,12 @@ export class RangeHoodDevice extends BaseDevice {
     return service;
   }
 
+  public override shutdown() {
+    // Any poll or write still in flight completes, but doesn't schedule another poll
+    this.polling_stopped = true;
+    clearTimeout(this.poll_timer);
+  }
+
   /**
    * Schedule the next status poll, replacing any poll that's already scheduled
    */

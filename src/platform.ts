@@ -5,6 +5,7 @@ import { PLATFORM_NAME, PLUGIN_NAME } from './settings.js';
 import { Astarte } from './api/astarte.js';
 import { ObjectStore } from './lib/objectstore.js';
 import { DeviceFactory, DeviceInfo } from './devices/factory.js';
+import type { BaseDevice } from './devices/base.js';
 import { InvalidConfigError, isTransientError } from './lib/errors.js';
 import { DeviceConfig, parsePluginConfig, PluginConfig } from './config.js';
 import { Result } from 'neverthrow';
@@ -28,6 +29,11 @@ export class FaberHomebridgePlatform implements DynamicPlatformPlugin {
   public readonly astarte: Astarte;
   private readonly object_store: ObjectStore;
   private readonly plugin_config: Result<PluginConfig, InvalidConfigError>;
+
+  // What to stop when Homebridge shuts down
+  private shutting_down = false;
+  private readonly retry_timers = new Set<ReturnType<typeof setTimeout>>();
+  private readonly devices: BaseDevice[] = [];
 
   constructor(
     public readonly log: Logging,
@@ -64,6 +70,38 @@ export class FaberHomebridgePlatform implements DynamicPlatformPlugin {
       }
       await this.runSafely('starting up', () => this.initAstarteAndDiscoverDevices(plugin_config));
     });
+
+    // Homebridge has already saved the accessory cache by then, and exits shortly after
+    this.api.on('shutdown', () => this.shutdown());
+  }
+
+  /**
+   * Stop all background activity: pending retries, and the devices' polling
+   */
+  private shutdown() {
+    this.log.debug('Shutting down');
+    this.shutting_down = true;
+    for (const timer of this.retry_timers) {
+      clearTimeout(timer);
+    }
+    this.retry_timers.clear();
+    for (const device of this.devices) {
+      device.shutdown();
+    }
+  }
+
+  /**
+   * Retry a task later, unless Homebridge is shutting down
+   */
+  private scheduleRetry(description: string, task: () => Promise<void>, delay_ms: number) {
+    if (this.shutting_down) {
+      return;
+    }
+    const timer = setTimeout(() => {
+      this.retry_timers.delete(timer);
+      void this.runSafely(description, task);
+    }, delay_ms);
+    this.retry_timers.add(timer);
   }
 
   /**
@@ -99,12 +137,14 @@ export class FaberHomebridgePlatform implements DynamicPlatformPlugin {
         return;
       }
       this.log.warn(`Astarte initialization failed. Retrying in ${retry_delay_ms / 1000} seconds`);
-      setTimeout(() => this.runSafely('starting up',
-        () => this.initAstarteAndDiscoverDevices(config, Math.min(retry_delay_ms * 2, RETRY_MAX_DELAY_MS))),
-      retry_delay_ms);
+      this.scheduleRetry('starting up',
+        () => this.initAstarteAndDiscoverDevices(config, Math.min(retry_delay_ms * 2, RETRY_MAX_DELAY_MS)), retry_delay_ms);
       return;
     }
 
+    if (this.shutting_down) {
+      return;
+    }
     // run the method to discover / register your devices as accessories
     await this.discoverDevices(config);
   }
@@ -192,14 +232,18 @@ export class FaberHomebridgePlatform implements DynamicPlatformPlugin {
         deviceInfo = { ...cachedDeviceInfo.value, name: deviceConfig.name || cachedDeviceInfo.value.name };
       } else if (isTransientError(error)) {
         this.log.warn(`Failed to get device info for device ID ${deviceId}. Retrying in ${retry_delay_ms / 1000} seconds`);
-        setTimeout(() => this.runSafely(`setting up device ID ${deviceId}`,
-          () => this.setUpDevice(deviceId, deviceConfig, uuid, Math.min(retry_delay_ms * 2, RETRY_MAX_DELAY_MS))),
-        retry_delay_ms);
+        this.scheduleRetry(`setting up device ID ${deviceId}`,
+          () => this.setUpDevice(deviceId, deviceConfig, uuid, Math.min(retry_delay_ms * 2, RETRY_MAX_DELAY_MS)), retry_delay_ms);
         return;
       } else {
         this.log.error('Failed to get device info for device ID', deviceId, error);
         return;
       }
+    }
+
+    if (this.shutting_down) {
+      // Homebridge has already saved the accessory cache, so don't change the accessories anymore
+      return;
     }
 
     // create a new accessory if needed, and store a copy of the device info in the accessory context
@@ -212,6 +256,7 @@ export class FaberHomebridgePlatform implements DynamicPlatformPlugin {
       this.log.error('Failed to set up device ID', deviceId, device.error);
       return;
     }
+    this.devices.push(device.value);
 
     if (existingAccessory) {
       this.log.info('Restored existing accessory from cache:', existingAccessory.displayName);

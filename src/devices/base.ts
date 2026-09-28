@@ -40,6 +40,12 @@ export class BaseDevice {
   }
 
   /**
+   * Stop any background activity (e.g. polling), since Homebridge is shutting down.
+   * Device types that have background activity should override this.
+   */
+  public shutdown() {}
+
+  /**
    * Apply the device's name to the accessory and all its services, overwriting any names set in the Home app.
    * Used when the device was renamed in the plugin config. HomeKit keeps its own copy of the accessory's name
    * once it's paired, so the Home app may not pick up the accessory's new name, but it does pick up the services' names.
