@@ -12,7 +12,9 @@ export class ObjectStore {
   protected node_persist: NodePersist.LocalStorage;
 
   constructor(public readonly storage_path: string) {
-    this.node_persist = NodePersist.create({ dir: storage_path, writeQueue: false });
+    // No expiring items are stored, so turn off the periodic scan for them (every 2 minutes by default). Besides being useless,
+    // its errors (e.g. if the directory became unreadable) are unhandled promise rejections, which make Homebridge shut down
+    this.node_persist = NodePersist.create({ dir: storage_path, writeQueue: false, expiredInterval: 0 });
   }
 
   init(): ResultAsync<void, StorageError> {
