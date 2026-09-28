@@ -1,5 +1,9 @@
 # Changelog
 
+## 3.0.2
+
+- The plugin's settings page in the Homebridge UI links to the README's instructions for getting the refresh token and device IDs
+
 ## 3.0.1
 
 ### Improvements to `get_token.py`

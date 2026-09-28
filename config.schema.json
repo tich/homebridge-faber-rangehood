@@ -3,6 +3,7 @@
   "pluginType": "platform",
   "singular": true,
   "strictValidation": true,
+  "headerDisplay": "See the [README](https://github.com/tich/homebridge-faber-rangehood#configuration) for how to get your refresh token and device IDs.",
   "schema": {
     "type": "object",
     "required": ["auth_mode", "refresh_token"],
@@ -28,6 +29,7 @@
       },
       "refresh_token": {
         "title": "Refresh Token",
+        "description": "From get_token.py. The plugin keeps it up to date by itself, so it's only needed once, unless the log says it has expired or is invalid (e.g. after changing your Faber account's password)",
         "type": "string",
         "minLength": 1,
         "placeholder": "eyJraWQiO...",
@@ -43,6 +45,8 @@
         "default": 300
       },
       "devices": {
+        "title": "Range Hoods",
+        "description": "The range hoods to show in the Home app. get_token.py lists the ones in your Faber account",
         "type": "array",
         "items": {
           "type": "object",
@@ -57,6 +61,7 @@
             },
             "id": {
               "title": "Device ID",
+              "description": "As listed by get_token.py",
               "type": "string",
               "minLength": 1,
               "placeholder": "PINb12jghtk23D9WEoweif"
