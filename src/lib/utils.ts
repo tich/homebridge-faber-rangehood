@@ -42,3 +42,14 @@ export async function untilAborted<T, E>(result: PromiseLike<Result<T, E>>, sign
     signal.removeEventListener('abort', onAbort!);
   }
 }
+
+/**
+ * A signal that aborts after the given delay. Like `AbortSignal.timeout()`, but based on `setTimeout`,
+ * so that it follows the same (possibly faked, in tests) clock as the rest of the plugin.
+ * The timer doesn't keep Node running on its own.
+ */
+export function timeoutSignal(delay_ms: number): AbortSignal {
+  const controller = new AbortController();
+  setTimeout(() => controller.abort(new DeadlineExceededError), delay_ms).unref?.();
+  return controller.signal;
+}

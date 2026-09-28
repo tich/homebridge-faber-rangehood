@@ -38,18 +38,20 @@ export class Astarte {
   constructor(
     private readonly log: Logging,
     private readonly object_store: ObjectStore,
+    // The services' base URLs. Only meant to be overridden by tests
+    base_urls: { auth?: string, api?: string, openid?: string } = {},
   ) {
-    this.openid_session = new OpenIDSession(log);
+    this.openid_session = new OpenIDSession(log, base_urls.openid);
     this.openid_session.onTokenChanged((id_token: string, refresh_token: string) => {
       void this.persistTokens(id_token, refresh_token);
     });
 
     this.auth_request = axios.create({
-      baseURL: ASTARTE_AUTH_URL,
+      baseURL: base_urls.auth ?? ASTARTE_AUTH_URL,
       timeout: REQUEST_TIMEOUT_MS,
     });
     this.api_request  = axios.create({
-      baseURL: ASTARTE_API_URL,
+      baseURL: base_urls.api ?? ASTARTE_API_URL,
       timeout: REQUEST_TIMEOUT_MS,
     });
     this.api_request.defaults.headers.post['Content-Type'] = 'application/json';
@@ -188,7 +190,8 @@ export class Astarte {
   private async _doRequest(
     device_id: string, api_interface: string, method: string, value: Record<string, unknown>, signal: AbortSignal | undefined, is_retry: boolean,
   ): Promise<Result<unknown, NetworkServiceError>> {
-    const headers: Record<string,string> = { 'Authorization': `Bearer ${this.id_token!}` };
+    const token = this.id_token;
+    const headers: Record<string,string> = { 'Authorization': `Bearer ${token!}` };
     const response = await ResultAsync.fromPromise(
       this.api_request({
         url: `${ASTARTE_API_ENDPOINT}/${ASTARTE_REALM}/devices/${device_id}/interfaces/${api_interface}`,
@@ -208,7 +211,8 @@ export class Astarte {
         // This error is returned if the Astarte ID token is expired
         // Refresh the ID token, then retry the call. The refresh isn't cancelled if the deadline passes, since it's shared
         // with other requests, and the next request will benefit from it. Only waiting for it is.
-        const refreshed = await untilAborted(this.refreshToken(), signal);
+        // If the token was already refreshed since this request was sent (e.g. by a concurrent request), just retry
+        const refreshed = this.id_token !== token ? ok() : await untilAborted(this.refreshToken(), signal);
         return refreshed.isErr() ? refreshed : await this._doRequest(device_id, api_interface, method, value, signal, true);
       }
       this.log.error('Failed to query Astarte', api_interface, status, (error as Error).message);

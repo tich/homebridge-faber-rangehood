@@ -26,10 +26,12 @@ export class OpenIDSession {
   private readonly request: AxiosInstance;
 
   constructor(
-        private readonly log: Logging,
+    private readonly log: Logging,
+    // Only meant to be overridden by tests
+    base_url: string = OPENID_AUTH_URL,
   ) {
     this.request = axios.create({
-      baseURL: OPENID_AUTH_URL,
+      baseURL: base_url,
       timeout: REQUEST_TIMEOUT_MS,
     });
     this.request.defaults.headers.post['Content-Type'] = 'application/x-www-form-urlencoded';

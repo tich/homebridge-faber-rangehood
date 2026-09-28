@@ -1,0 +1,13 @@
+{
+  // Compiles the plugin together with its tests, into build-test/ (see the `test` script)
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "rootDir": ".",
+    "outDir": "build-test",
+    "declaration": false
+  },
+  "include": [
+    "src",
+    "test"
+  ]
+}

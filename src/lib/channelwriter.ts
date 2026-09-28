@@ -1,4 +1,5 @@
 import { DeadlineExceededError } from './errors.js';
+import { timeoutSignal } from './utils.js';
 
 interface Waiter {
   resolve: () => void;
@@ -96,7 +97,7 @@ export class ChannelWriter<T> {
 
     // Keep the request going for as long as any of its writes is still waiting for it
     const deadline = Math.max(...waiting.map((waiter) => waiter.deadline));
-    const signal = AbortSignal.timeout(Math.max(deadline - Date.now(), 0));
+    const signal = timeoutSignal(Math.max(deadline - Date.now(), 0));
 
     this.in_flight = true;
     let sent: { value: T } | undefined;

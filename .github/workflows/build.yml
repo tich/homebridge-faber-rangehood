@@ -30,6 +30,9 @@ jobs:
       - name: Build the project
         run: npm run build
 
+      - name: Test the project
+        run: npm test
+
   audit:
     runs-on: ubuntu-latest
 

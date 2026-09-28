@@ -136,3 +136,6 @@ web_modules/
 test/
 # local eslint rules
 eslint-rules
+
+# compiled tests
+build-test

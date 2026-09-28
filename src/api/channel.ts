@@ -6,12 +6,22 @@ import { Astarte } from './astarte.js';
 import { ASTARTE_CHANNELS_URL, ASTARTE_REALM } from './constants.js';
 import { isTransientError } from '../lib/errors.js';
 
-// Backoff for reconnecting after the connection failed or dropped
-const RECONNECT_MIN_DELAY_MS = 10 * 1000;
-const RECONNECT_MAX_DELAY_MS = 5 * 60 * 1000;
-// The server closes idle connections, so send a heartbeat regularly. A heartbeat that isn't answered by the time the next
-// one is due means the connection is dead (e.g. a network change), even if the socket hasn't noticed yet
-const HEARTBEAT_INTERVAL_MS = 25 * 1000;
+export interface ChannelOptions {
+  url: string;
+  // Backoff for reconnecting after the connection failed or dropped
+  reconnect_min_delay_ms: number;
+  reconnect_max_delay_ms: number;
+  // The server closes idle connections, so send a heartbeat regularly. A heartbeat that isn't answered by the time the next
+  // one is due means the connection is dead (e.g. a network change), even if the socket hasn't noticed yet
+  heartbeat_interval_ms: number;
+}
+
+const DEFAULT_OPTIONS: ChannelOptions = {
+  url: ASTARTE_CHANNELS_URL,
+  reconnect_min_delay_ms: 10 * 1000,
+  reconnect_max_delay_ms: 5 * 60 * 1000,
+  heartbeat_interval_ms: 25 * 1000,
+};
 
 /**
  * A change a device reported on one of its interfaces
@@ -72,15 +82,20 @@ export class AstarteChannel {
   private heartbeat_timer?: ReturnType<typeof setInterval>;
   private awaiting_heartbeat_ref?: string;
   private reconnect_timer?: ReturnType<typeof setTimeout>;
-  private reconnect_delay_ms = RECONNECT_MIN_DELAY_MS;
+  private readonly options: ChannelOptions;
+  private reconnect_delay_ms: number;
   private started = false;
   private failed_attempts = 0;
 
   constructor(
     private readonly log: Logging,
     private readonly astarte: Astarte,
-    private readonly url: string = ASTARTE_CHANNELS_URL,
-  ) {}
+    // Only meant to be overridden by tests
+    options: Partial<ChannelOptions> = {},
+  ) {
+    this.options = { ...DEFAULT_OPTIONS, ...options };
+    this.reconnect_delay_ms = this.options.reconnect_min_delay_ms;
+  }
 
   /**
    * Watch the changes a device reports on an interface. Can be called before or after `start()`
@@ -126,7 +141,7 @@ export class AstarteChannel {
 
     const { token, user_id } = credentials.value;
     this.topic = `rooms:${ASTARTE_REALM}:${user_id}`;
-    const socket = new WebSocket(`${this.url}?vsn=2.0.0&realm=${ASTARTE_REALM}&token=${encodeURIComponent(token)}`);
+    const socket = new WebSocket(`${this.options.url}?vsn=2.0.0&realm=${ASTARTE_REALM}&token=${encodeURIComponent(token)}`);
     this.socket = socket;
     socket.on('open', () => {
       // Started before joining, so that a connection that never answers is detected too
@@ -153,7 +168,7 @@ export class AstarteChannel {
       }
       this.log.info('Receiving push updates');
       this.joined = true;
-      this.reconnect_delay_ms = RECONNECT_MIN_DELAY_MS;
+      this.reconnect_delay_ms = this.options.reconnect_min_delay_ms;
       this.failed_attempts = 0;
       for (const [name, watch] of this.watches) {
         this.installWatch(name, watch);
@@ -199,7 +214,7 @@ export class AstarteChannel {
       this.awaiting_heartbeat_ref = this.send('phoenix', 'heartbeat', {}, () => {
         this.awaiting_heartbeat_ref = undefined;
       });
-    }, HEARTBEAT_INTERVAL_MS);
+    }, this.options.heartbeat_interval_ms);
   }
 
   /**
@@ -298,6 +313,6 @@ export class AstarteChannel {
   private scheduleReconnect() {
     clearTimeout(this.reconnect_timer);
     this.reconnect_timer = setTimeout(() => void this.connect(), this.reconnect_delay_ms);
-    this.reconnect_delay_ms = Math.min(this.reconnect_delay_ms * 2, RECONNECT_MAX_DELAY_MS);
+    this.reconnect_delay_ms = Math.min(this.reconnect_delay_ms * 2, this.options.reconnect_max_delay_ms);
   }
 }

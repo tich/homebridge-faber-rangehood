@@ -18,7 +18,7 @@ import {
   TokenExpiredError,
   UnknownResponseError,
 } from '../lib/errors.js';
-import { mapRange } from '../lib/utils.js';
+import { mapRange, timeoutSignal } from '../lib/utils.js';
 import { ChannelWriter } from '../lib/channelwriter.js';
 import type { ChannelEvent } from '../api/channel.js';
 import { PLUGIN_VERSION } from '../settings.js';
@@ -730,7 +730,7 @@ export class RangeHoodDevice extends BaseDevice {
     const post_data = {
       data: true,
     };
-    const result = await this.sendControlRequest('/filters/fc/resetCountdown', post_data, AbortSignal.timeout(this.write_deadline_ms));
+    const result = await this.sendControlRequest('/filters/fc/resetCountdown', post_data, timeoutSignal(this.write_deadline_ms));
     if (result.isErr()) {
       throw this.toHapStatusError(result.error);
     }
@@ -742,7 +742,7 @@ export class RangeHoodDevice extends BaseDevice {
     const post_data = {
       data: true,
     };
-    const result = await this.sendControlRequest('/filters/fg/resetCountdown', post_data, AbortSignal.timeout(this.write_deadline_ms));
+    const result = await this.sendControlRequest('/filters/fg/resetCountdown', post_data, timeoutSignal(this.write_deadline_ms));
     if (result.isErr()) {
       throw this.toHapStatusError(result.error);
     }

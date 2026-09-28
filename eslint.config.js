@@ -4,7 +4,7 @@ import mustUseResult from './eslint-rules/must-use-result.js';
 
 export default tseslint.config(
   {
-    ignores: ['dist/**'],
+    ignores: ['dist/**', 'build-test/**'],
   },
   {
     rules: {
