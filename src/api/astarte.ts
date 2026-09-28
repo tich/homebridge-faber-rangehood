@@ -5,7 +5,7 @@ import zod from 'zod';
 import { err, ok, Result, ResultAsync } from 'neverthrow';
 import { OpenIDSession } from './openid.js';
 import { ObjectStore } from '../lib/objectstore.js';
-import { DeadlineExceededError, NetworkServiceError, StorageError, UnknownResponseError } from '../lib/errors.js';
+import { DeadlineExceededError, errorForHttpStatus, NetworkServiceError, StorageError, UnknownResponseError } from '../lib/errors.js';
 import type { PluginConfig } from '../config.js';
 import { toRedactedJSON, untilAborted } from '../lib/utils.js';
 import {
@@ -113,7 +113,7 @@ export class Astarte {
         return refreshed.isErr() ? refreshed : await this.fetchUserId(true);
       }
       this.log.error('Failed to query Astarte user info:', status, (error as Error).message);
-      return err(new NetworkServiceError);
+      return err(errorForHttpStatus(status));
     }
 
     const parsed_response = ResponseFormat.safeParse(response.value.data);
@@ -167,7 +167,7 @@ export class Astarte {
       }
       this.log.error('Failed to query Astarte token:', status, (error as Error).message);
       this.id_token = undefined;
-      return err(new NetworkServiceError);
+      return err(errorForHttpStatus(status));
     }
 
     const parsed_response = ResponseFormat.safeParse(response.value.data);
@@ -212,7 +212,7 @@ export class Astarte {
         return refreshed.isErr() ? refreshed : await this._doRequest(device_id, api_interface, method, value, signal, true);
       }
       this.log.error('Failed to query Astarte', api_interface, status, (error as Error).message);
-      return err(new NetworkServiceError);
+      return err(errorForHttpStatus(status));
     }
     return ok(response.value.data);
   }

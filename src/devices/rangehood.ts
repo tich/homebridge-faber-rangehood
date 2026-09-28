@@ -10,7 +10,14 @@ import {
   ASTARTE_INTERFACE_HOOD_MOTOR_PROPERTIES,
   ASTARTE_INTERFACE_HOOD_STATUS }
   from '../api/constants.js';
-import { DeadlineExceededError, InvalidCacheError, NetworkServiceError, TokenExpiredError, UnknownResponseError } from '../lib/errors.js';
+import {
+  DeadlineExceededError,
+  InvalidCacheError,
+  isTransientError,
+  NetworkServiceError,
+  TokenExpiredError,
+  UnknownResponseError,
+} from '../lib/errors.js';
 import { mapRange } from '../lib/utils.js';
 import { ChannelWriter } from '../lib/channelwriter.js';
 import { PLUGIN_VERSION } from '../settings.js';
@@ -345,7 +352,9 @@ export class RangeHoodDevice extends BaseDevice {
       return ok(parsed_data.data.data);
     });
     if (parsed_status.isErr()) {
-      if (parsed_status.error instanceof TokenExpiredError || parsed_status.error instanceof UnknownResponseError) {
+      if (!isTransientError(parsed_status.error)) {
+        // Retrying won't help (e.g. the refresh token expired, or the request was rejected), and the reason was logged already
+        this.platform.log.error('Stopped updating the status of', this.device_info.name + '. Restart Homebridge once the problem above is fixed');
         this.propagateHapStatus(HAPStatus.SERVICE_COMMUNICATION_FAILURE);
         this.polling_stopped = true;
       } else {
