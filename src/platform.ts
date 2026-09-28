@@ -3,6 +3,7 @@ import * as Path from 'path';
 
 import { PLATFORM_NAME, PLUGIN_NAME } from './settings.js';
 import { Astarte } from './api/astarte.js';
+import { AstarteChannel } from './api/channel.js';
 import { ObjectStore } from './lib/objectstore.js';
 import { DeviceFactory, DeviceInfo } from './devices/factory.js';
 import type { BaseDevice } from './devices/base.js';
@@ -27,6 +28,8 @@ export class FaberHomebridgePlatform implements DynamicPlatformPlugin {
   public readonly accessories: Map<string, PlatformAccessory> = new Map();
 
   public readonly astarte: Astarte;
+  public readonly channel: AstarteChannel;
+  public readonly fallback_poll_interval_ms: number;
   private readonly object_store: ObjectStore;
   private readonly plugin_config: Result<PluginConfig, InvalidConfigError>;
 
@@ -46,6 +49,9 @@ export class FaberHomebridgePlatform implements DynamicPlatformPlugin {
     this.object_store = new ObjectStore(Path.join(api.user.storagePath(), PLUGIN_NAME, 'persist'));
     this.astarte = new Astarte(log, this.object_store);
     this.plugin_config = parsePluginConfig(config);
+    this.channel = new AstarteChannel(log, this.astarte);
+    // Only used once the config was found to be valid
+    this.fallback_poll_interval_ms = this.plugin_config.map((value) => value.fallback_poll_interval * 1000).unwrapOr(0);
 
     this.log.debug('Finished initializing platform:', this.config.name);
 
@@ -81,6 +87,7 @@ export class FaberHomebridgePlatform implements DynamicPlatformPlugin {
   private shutdown() {
     this.log.debug('Shutting down');
     this.shutting_down = true;
+    this.channel.stop();
     for (const timer of this.retry_timers) {
       clearTimeout(timer);
     }
@@ -147,6 +154,10 @@ export class FaberHomebridgePlatform implements DynamicPlatformPlugin {
     }
     // run the method to discover / register your devices as accessories
     await this.discoverDevices(config);
+    if (!this.shutting_down) {
+      // Devices set up later (e.g. after a retry) start receiving push updates as soon as they're set up
+      this.channel.start();
+    }
   }
 
   /**

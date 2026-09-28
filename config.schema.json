@@ -35,6 +35,13 @@
           "functionBody": "return model.auth_mode === 'token';"
         }
       },
+      "fallback_poll_interval": {
+        "title": "Fallback Poll Interval (seconds)",
+        "description": "The hoods' status is pushed to Homebridge as it changes. As a safety net, it's also polled this often. When push updates aren't available, it's polled every few seconds instead",
+        "type": "integer",
+        "minimum": 30,
+        "default": 300
+      },
       "devices": {
         "type": "array",
         "items": {

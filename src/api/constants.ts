@@ -10,6 +10,8 @@ export const ASTARTE_TOKEN_ENDPOINT = '/astarte-associator/tokens';
 
 export const ASTARTE_API_URL = 'https://api-astarte.cloud.faberspa.com';
 export const ASTARTE_API_ENDPOINT = '/appengine/v1';
+// Astarte's real-time channels: a Phoenix WebSocket, where a client joins a room and watches devices' data
+export const ASTARTE_CHANNELS_URL = 'wss://api-astarte.cloud.faberspa.com/appengine/v1/socket/websocket';
 
 export const ASTARTE_INTERFACE_DEVICE_DETAILS = 'com.faberspa.DeviceDetails';
 export const ASTARTE_INTERFACE_HOOD_STATUS = 'com.faberspa.connectedhood.HoodStatus';

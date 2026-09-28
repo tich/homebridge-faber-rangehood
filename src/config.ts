@@ -11,6 +11,8 @@ const PluginConfigFormat = zod.looseObject({
   name: zod.string().optional(),
   auth_mode: zod.literal('token'),
   refresh_token: zod.string().min(1),
+  // Seconds. While push updates are active, how often to also poll the hoods' status, in case an update was missed
+  fallback_poll_interval: zod.number().int().min(30).default(300),
   devices: zod.array(zod.object({
     id: zod.string().min(1),
     name: zod.string().optional(),

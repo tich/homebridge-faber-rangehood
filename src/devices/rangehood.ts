@@ -20,6 +20,7 @@ import {
 } from '../lib/errors.js';
 import { mapRange } from '../lib/utils.js';
 import { ChannelWriter } from '../lib/channelwriter.js';
+import type { ChannelEvent } from '../api/channel.js';
 import { PLUGIN_VERSION } from '../settings.js';
 
 /**
@@ -94,6 +95,34 @@ const HoodFeaturesFormat = zod.object({
 
 type HoodFeatures = zod.infer<typeof HoodFeaturesFormat>;
 
+/**
+ * The hood's independent control channels. Reports about one channel are unaffected by writes to the others,
+ * so each channel is protected from outdated reports separately (see `pauseReportsDuring`)
+ */
+type ControlChannel = 'light' | 'color_temperature' | 'fan' | 'carbon_filter' | 'grease_filter';
+
+/**
+ * The channel a status or control path belongs to (e.g. "/fan/speed" belongs to "fan")
+ */
+function channelOf(path: string): ControlChannel | undefined {
+  if (path.startsWith('/lights/channels/1/')) {
+    return 'light';
+  }
+  if (path.startsWith('/lights/channels/2/')) {
+    return 'color_temperature';
+  }
+  if (path.startsWith('/fan/')) {
+    return 'fan';
+  }
+  if (path.startsWith('/filters/fc/')) {
+    return 'carbon_filter';
+  }
+  if (path.startsWith('/filters/fg/')) {
+    return 'grease_filter';
+  }
+  return undefined;
+}
+
 export class RangeHoodDevice extends BaseDevice {
   private readonly capabilities: HoodCapabilities;
   private readonly fan_service: Service;
@@ -101,6 +130,8 @@ export class RangeHoodDevice extends BaseDevice {
   private readonly carbon_filter_service?: Service;
   private readonly grease_filter_service?: Service;
 
+  // How often to poll the hood's status while push updates aren't active. While they are, polls are only a safety net,
+  // at the (configurable) `platform.fallback_poll_interval_ms`
   private readonly refresh_interval_ms = 3 * 1000;
   // How long a command from HomeKit may take. HAP-NodeJS gives up on a write handler after 9 seconds,
   // and reports a timeout instead of our error, so give up just before that.
@@ -110,12 +141,20 @@ export class RangeHoodDevice extends BaseDevice {
   private readonly max_refresh_interval_ms = 5 * 60 * 1000;
   private consecutive_poll_failures = 0;
 
-  // Polling is paused while writes are in flight, so a poll can't overwrite a write with an outdated state
   private poll_timer?: ReturnType<typeof setTimeout>;
+  private poll_due_at?: number; // When the scheduled poll will run (ms since epoch)
   private polling_stopped = false;
-  private writes_in_flight = 0;
-  // Incremented whenever a write starts, so a poll can tell that a write happened while it was in flight
-  private write_generation = 0;
+  private push_active = false;
+
+  // Reports (poll results and push events) about a channel are held back while a write to it is in flight,
+  // so an outdated report can't overwrite the write. Nothing is lost: once the write completes, a poll fetches
+  // the current state, which includes whatever was held back.
+  private readonly writes_in_flight = new Map<ControlChannel, number>();
+  // Incremented whenever a write to a channel starts, so a poll can tell that one happened while it was in flight
+  private readonly write_generations = new Map<ControlChannel, number>();
+  // When the cloud received the value last applied for each status path (ms since epoch),
+  // so that an older report (e.g. from a slow poll) can't overwrite a newer one (e.g. from a push event)
+  private readonly reported_at = new Map<string, number>();
 
   private readonly state: HoodState;
   private readonly light_writer: ChannelWriter<number>;
@@ -216,6 +255,10 @@ export class RangeHoodDevice extends BaseDevice {
       () => this.getFanSpeed(),
       (speed, signal) => this.sendToChannel('/fan/speed', speed, signal));
 
+    this.platform.channel.watch(this.device_info.id, ASTARTE_INTERFACE_HOOD_STATUS, {
+      onEvent: (event) => this.onPushEvent(event),
+      onActiveChange: (active) => this.onPushActiveChange(active),
+    });
     this.schedulePoll();
   }
 
@@ -265,26 +308,43 @@ export class RangeHoodDevice extends BaseDevice {
     // Any poll or write still in flight completes, but doesn't schedule another poll
     this.polling_stopped = true;
     clearTimeout(this.poll_timer);
+    this.poll_timer = undefined;
   }
 
   /**
-   * Schedule the next status poll, replacing any poll that's already scheduled
+   * Schedule a status poll to run no later than after the given delay. A poll that's already scheduled to run sooner is kept,
+   * so that e.g. the regular schedule can't postpone the poll that follows a write.
+   * @param delay_ms Defaults to the regular interval, which is much longer while push updates are active,
+   * and backs off exponentially while polls keep failing with network errors
    */
-  private schedulePoll() {
-    clearTimeout(this.poll_timer);
+  private schedulePoll(delay_ms?: number) {
     if (this.polling_stopped) {
       return;
     }
-    const delay_ms = Math.min(this.refresh_interval_ms * 2 ** this.consecutive_poll_failures, this.max_refresh_interval_ms);
-    this.poll_timer = setTimeout(() => this.updateHoodStatus(), delay_ms);
+    if (delay_ms === undefined) {
+      const interval_ms = this.push_active ? this.platform.fallback_poll_interval_ms : this.refresh_interval_ms;
+      delay_ms = Math.min(interval_ms * 2 ** this.consecutive_poll_failures, Math.max(interval_ms, this.max_refresh_interval_ms));
+    }
+    const due_at = Date.now() + delay_ms;
+    if (this.poll_timer !== undefined && this.poll_due_at! <= due_at) {
+      return;
+    }
+    clearTimeout(this.poll_timer);
+    this.poll_due_at = due_at;
+    this.poll_timer = setTimeout(() => {
+      this.poll_timer = undefined;
+      void this.updateHoodStatus();
+    }, delay_ms);
   }
 
   /**
-   * A poll's result is outdated if a write is in flight, or if one started after the poll did.
-   * The write's completion schedules the next poll, so an outdated poll shouldn't schedule one itself.
+   * Whether reports about a channel should be held back, since a write to it is in flight,
+   * or since one started after the report was fetched (i.e. the report predates the write)
+   * @param generations_at_fetch The write generations when the report was fetched, for a poll
    */
-  private isPollOutdated(poll_write_generation: number) {
-    return this.writes_in_flight > 0 || poll_write_generation !== this.write_generation;
+  private isChannelBusy(channel: ControlChannel, generations_at_fetch?: Map<ControlChannel, number>) {
+    return (this.writes_in_flight.get(channel) ?? 0) > 0
+      || (generations_at_fetch !== undefined && generations_at_fetch.get(channel) !== this.write_generations.get(channel));
   }
 
   private propagateHapStatus(hapStatus: HAPStatus) {
@@ -307,42 +367,32 @@ export class RangeHoodDevice extends BaseDevice {
   }
 
   private async updateHoodStatus() {
-    const Intensity = zod.object({
-      intensity: zod.object({
-        value: zod.number(),
-      }),
-    });
-    const HoursUntilReplacement = zod.object({
-      hoursUntilReplacement: zod.object({
-        value: zod.number(),
-      }),
+    // Each value comes with when the cloud received it, which `applyReport` uses to ignore outdated values
+    const Reported = zod.object({
+      value: zod.number(),
+      reception_timestamp: zod.string().optional(),
     });
     // Everything but the fan is optional, since not every hood has every feature
     const ResponseFormat = zod.object({
       data: zod.object({
         fan: zod.object({
-          speed: zod.object({
-            value: zod.number(),
-          }),
+          speed: Reported,
         }),
         filters: zod.object({
-          fc: HoursUntilReplacement.optional(),
-          fg: HoursUntilReplacement.optional(),
+          fc: zod.object({ hoursUntilReplacement: Reported }).optional(),
+          fg: zod.object({ hoursUntilReplacement: Reported }).optional(),
         }).optional(),
         lights: zod.object({
           channels: zod.object({
-            1: Intensity.optional(),
-            2: Intensity.optional(),
+            1: zod.object({ intensity: Reported }).optional(),
+            2: zod.object({ intensity: Reported }).optional(),
           }),
         }).optional(),
       }),
     });
 
-    const poll_write_generation = this.write_generation;
+    const generations_at_fetch = new Map(this.write_generations);
     const data = await this.platform.astarte.doRequest(this.device_info.id, ASTARTE_INTERFACE_HOOD_STATUS, AstarteRequestMethod.GET, {});
-    if (this.isPollOutdated(poll_write_generation)) {
-      return;
-    }
     const parsed_status = data.andThen((value) => {
       const parsed_data = ResponseFormat.safeParse(value);
       if (!parsed_data.success) {
@@ -374,43 +424,103 @@ export class RangeHoodDevice extends BaseDevice {
       this.consecutive_poll_failures = 0;
     }
 
-    // Track the reported state, so the next writes start from it (e.g. after the hood's own buttons were used).
-    // When the light or fan is off, keep the last brightness or speed, so turning it back on restores it.
-    const light_intensity = status.lights?.channels[1]?.intensity.value;
-    if (this.capabilities.max_light_intensity !== undefined && light_intensity !== undefined) {
-      this.state.light.on = light_intensity > 0;
-      if (this.state.light.on) {
-        this.state.light.brightness = Math.round(mapRange(light_intensity, 0, this.capabilities.max_light_intensity, 0, 100));
+    // The same paths as push events use
+    const reports: [string, zod.infer<typeof Reported> | undefined][] = [
+      ['/lights/channels/1/intensity', status.lights?.channels[1]?.intensity],
+      ['/lights/channels/2/intensity', status.lights?.channels[2]?.intensity],
+      ['/fan/speed', status.fan.speed],
+      ['/filters/fc/hoursUntilReplacement', status.filters?.fc?.hoursUntilReplacement],
+      ['/filters/fg/hoursUntilReplacement', status.filters?.fg?.hoursUntilReplacement],
+    ];
+    for (const [path, reported] of reports) {
+      // A channel written to since this poll was sent gets a poll of its own once the write completes
+      if (reported !== undefined && !this.isChannelBusy(channelOf(path)!, generations_at_fetch)) {
+        const timestamp = reported.reception_timestamp === undefined ? undefined : Date.parse(reported.reception_timestamp);
+        this.applyReport(path, reported.value, Number.isNaN(timestamp) ? undefined : timestamp);
       }
     }
-    const color_temperature_setting = status.lights?.channels[2]?.intensity.value;
-    if (this.capabilities.max_color_temperature_setting !== undefined && color_temperature_setting !== undefined) {
-      this.state.light.color_temperature = mapRange(color_temperature_setting, 0, this.capabilities.max_color_temperature_setting,
-        this.min_color_temperature_mireds, this.max_color_temperature_mireds);
-    }
-    const fan_speed = status.fan.speed.value;
-    this.state.fan.active = fan_speed > 0;
-    if (this.state.fan.active) {
-      this.state.fan.speed = mapRange(fan_speed, 0, this.capabilities.max_fan_speed, 0, 100);
-    }
-
-    // Brightness and speed are updated even when the light or fan is off: re-asserting the value
-    // still clears any error status left behind by a failed write
-    if (this.light_service) {
-      this.light_service.updateCharacteristic(this.platform.Characteristic.On, this.state.light.on);
-      this.light_service.updateCharacteristic(this.platform.Characteristic.Brightness, this.state.light.brightness);
-      if (this.capabilities.max_color_temperature_setting !== undefined) {
-        this.light_service.updateCharacteristic(this.platform.Characteristic.ColorTemperature, this.state.light.color_temperature);
-      }
-    }
-    this.fan_service.updateCharacteristic(this.platform.Characteristic.Active,
-      this.state.fan.active ? this.platform.Characteristic.Active.ACTIVE : this.platform.Characteristic.Active.INACTIVE);
-    this.fan_service.updateCharacteristic(this.platform.Characteristic.RotationSpeed, this.state.fan.speed);
-
-    this.updateFilterStatus(this.carbon_filter_service, status.filters?.fc?.hoursUntilReplacement.value, this.capabilities.carbon_filter_hours);
-    this.updateFilterStatus(this.grease_filter_service, status.filters?.fg?.hoursUntilReplacement.value, this.capabilities.grease_filter_hours);
 
     this.schedulePoll();
+  }
+
+  /**
+   * A change the hood reported, as it happened. See `AstarteChannel`
+   */
+  private onPushEvent(event: ChannelEvent) {
+    const channel = channelOf(event.path);
+    if (channel !== undefined && this.isChannelBusy(channel)) {
+      // The poll that follows the write catches up on it
+      this.platform.log.debug('Holding back a push update for', event.path, 'during a write');
+      return;
+    }
+    this.applyReport(event.path, event.value, event.timestamp);
+  }
+
+  private onPushActiveChange(active: boolean) {
+    this.push_active = active;
+    // Once active, catch up on anything missed while inactive; after that, polls are only a safety net.
+    // While inactive, poll at the regular interval again
+    this.schedulePoll(active ? this.refresh_interval_ms : undefined);
+  }
+
+  /**
+   * Apply a value the hood reported for one of its status paths, from a poll or a push event
+   * @param timestamp When the cloud received the value (ms since epoch). An older value than the one last applied is ignored.
+   * When unknown, the value is applied regardless.
+   */
+  private applyReport(path: string, value: unknown, timestamp: number | undefined) {
+    if (typeof value !== 'number') {
+      this.platform.log.debug('Ignoring an unexpected value for', path + ':', JSON.stringify(value));
+      return;
+    }
+    if (timestamp !== undefined) {
+      const last_timestamp = this.reported_at.get(path);
+      if (last_timestamp !== undefined && timestamp < last_timestamp) {
+        return;
+      }
+      this.reported_at.set(path, timestamp);
+    }
+
+    // Track the reported state, so the next writes start from it (e.g. after the hood's own buttons were used).
+    // When the light or fan is off, keep the last brightness or speed, so turning it back on restores it.
+    // Brightness and speed are updated even when the light or fan is off: re-asserting the value
+    // still clears any error status left behind by a failed write
+    switch (path) {
+    case '/lights/channels/1/intensity':
+      if (this.light_service && this.capabilities.max_light_intensity !== undefined) {
+        this.state.light.on = value > 0;
+        if (this.state.light.on) {
+          this.state.light.brightness = Math.round(mapRange(value, 0, this.capabilities.max_light_intensity, 0, 100));
+        }
+        this.light_service.updateCharacteristic(this.platform.Characteristic.On, this.state.light.on);
+        this.light_service.updateCharacteristic(this.platform.Characteristic.Brightness, this.state.light.brightness);
+      }
+      break;
+    case '/lights/channels/2/intensity':
+      if (this.light_service && this.capabilities.max_color_temperature_setting !== undefined) {
+        this.state.light.color_temperature = mapRange(value, 0, this.capabilities.max_color_temperature_setting,
+          this.min_color_temperature_mireds, this.max_color_temperature_mireds);
+        this.light_service.updateCharacteristic(this.platform.Characteristic.ColorTemperature, this.state.light.color_temperature);
+      }
+      break;
+    case '/fan/speed':
+      this.state.fan.active = value > 0;
+      if (this.state.fan.active) {
+        this.state.fan.speed = mapRange(value, 0, this.capabilities.max_fan_speed, 0, 100);
+      }
+      this.fan_service.updateCharacteristic(this.platform.Characteristic.Active,
+        this.state.fan.active ? this.platform.Characteristic.Active.ACTIVE : this.platform.Characteristic.Active.INACTIVE);
+      this.fan_service.updateCharacteristic(this.platform.Characteristic.RotationSpeed, this.state.fan.speed);
+      break;
+    case '/filters/fc/hoursUntilReplacement':
+      this.updateFilterStatus(this.carbon_filter_service, value, this.capabilities.carbon_filter_hours);
+      break;
+    case '/filters/fg/hoursUntilReplacement':
+      this.updateFilterStatus(this.grease_filter_service, value, this.capabilities.grease_filter_hours);
+      break;
+    default:
+      this.platform.log.debug('Ignoring a report for an unknown path:', path);
+    }
   }
 
   private updateFilterStatus(filter_service: Service | undefined, hours_until_replacement: number | undefined, replacement_hours?: number) {
@@ -466,28 +576,28 @@ export class RangeHoodDevice extends BaseDevice {
   }
 
   /**
-   * Hold off polling until the write completes. Any poll already in flight will discard its result.
-   * Writes can be nested; polling resumes once the outermost one completes.
+   * Hold back reports about a channel until a write to it completes. Writes can be nested;
+   * reports are applied again once the outermost one completes.
    */
-  private async pausePollingDuring<T>(write: () => Promise<T>): Promise<T> {
-    this.writes_in_flight++;
-    this.write_generation++;
-    clearTimeout(this.poll_timer);
+  private async pauseReportsDuring<T>(channel: ControlChannel, write: () => Promise<T>): Promise<T> {
+    this.writes_in_flight.set(channel, (this.writes_in_flight.get(channel) ?? 0) + 1);
+    this.write_generations.set(channel, (this.write_generations.get(channel) ?? 0) + 1);
     try {
       return await write();
     } finally {
-      // Resume polling after the last write. The hood reports its new state asynchronously,
-      // so polling immediately would likely read the state from before the write
-      this.writes_in_flight--;
-      if (this.writes_in_flight === 0) {
-        this.schedulePoll();
+      const remaining = this.writes_in_flight.get(channel)! - 1;
+      this.writes_in_flight.set(channel, remaining);
+      if (remaining === 0) {
+        // Catch up on the reports held back meanwhile. The hood reports its new state asynchronously,
+        // so polling immediately would likely read the state from before the write
+        this.schedulePoll(this.refresh_interval_ms);
       }
     }
   }
 
   private async sendControlRequest(api_interface: string, data: Record<string, unknown>, signal: AbortSignal)
     : Promise<Result<void, NetworkServiceError>> {
-    return await this.pausePollingDuring(async () => {
+    return await this.pauseReportsDuring(channelOf(api_interface)!, async () => {
       this.platform.log.debug('Sending:', api_interface, JSON.stringify(data));
       const result = await this.platform.astarte.doRequest(
         this.device_info.id,
@@ -522,8 +632,8 @@ export class RangeHoodDevice extends BaseDevice {
   /**
    * Send a channel's latest requested state, from a characteristic's write handler
    */
-  private async writeChannel(writer: ChannelWriter<number>) {
-    await this.pausePollingDuring(async () => {
+  private async writeChannel(channel: ControlChannel, writer: ChannelWriter<number>) {
+    await this.pauseReportsDuring(channel, async () => {
       try {
         await writer.write(this.write_deadline_ms);
       } catch (error) {
@@ -582,7 +692,7 @@ export class RangeHoodDevice extends BaseDevice {
   async setLightOn(value: CharacteristicValue) {
     this.platform.log.debug('Turning light', value ? 'On': 'Off');
     this.state.light.on = value as boolean;
-    await this.writeChannel(this.light_writer);
+    await this.writeChannel('light', this.light_writer);
   }
 
   async setLightBrightness(value: CharacteristicValue) {
@@ -590,19 +700,19 @@ export class RangeHoodDevice extends BaseDevice {
     this.state.light.brightness = value as number;
     // Setting a brightness also turns the light on (or off, for 0%)
     this.state.light.on = this.state.light.brightness > 0;
-    await this.writeChannel(this.light_writer);
+    await this.writeChannel('light', this.light_writer);
   }
 
   async setColorTemperature(value: CharacteristicValue) {
     this.platform.log.debug('Setting color temperature to', value);
     this.state.light.color_temperature = value as number;
-    await this.writeChannel(this.color_temperature_writer);
+    await this.writeChannel('color_temperature', this.color_temperature_writer);
   }
 
   async setFanActive(value: CharacteristicValue) {
     this.platform.log.debug('Turning fan', value === this.platform.Characteristic.Active.ACTIVE ? 'On': 'Off');
     this.state.fan.active = value === this.platform.Characteristic.Active.ACTIVE;
-    await this.writeChannel(this.fan_writer);
+    await this.writeChannel('fan', this.fan_writer);
   }
 
   async setFanSpeed(value: CharacteristicValue) {
@@ -610,7 +720,7 @@ export class RangeHoodDevice extends BaseDevice {
     this.state.fan.speed = value as number;
     // Setting a speed also turns the fan on (or off, for 0%)
     this.state.fan.active = this.state.fan.speed > 0;
-    await this.writeChannel(this.fan_writer);
+    await this.writeChannel('fan', this.fan_writer);
   }
 
   // The filter reset handlers are only registered when the hood has that filter

@@ -237,6 +237,18 @@ export class Astarte {
   }
 
   /**
+   * Get what's needed to connect to Astarte's channels: a fresh Astarte token (so it lasts the connection as long as
+   * possible), and the user's ID, which is the name of the user's room
+   */
+  public async getChannelCredentials(): Promise<Result<{ token: string; user_id: string }, NetworkServiceError>> {
+    const refreshed = await this.refreshToken();
+    if (refreshed.isErr()) {
+      return err(refreshed.error);
+    }
+    return ok({ token: this.id_token!, user_id: this.user_id! });
+  }
+
+  /**
    * Retrieve the list of devices that the current user's account has access to
    * @returns {string[]} A list of device ID strings
    */
