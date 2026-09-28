@@ -696,7 +696,7 @@ export class RangeHoodDevice extends BaseDevice {
   // They must record it before any `await`, so that the writer sees all the writes of a HomeKit request.
 
   async setLightOn(value: CharacteristicValue) {
-    this.platform.log.debug('Turning light', value ? 'On': 'Off');
+    this.platform.log.debug('Turning light', value ? 'On' : 'Off');
     this.state.light.on = value as boolean;
     await this.writeChannel('light', this.light_writer);
   }
@@ -716,7 +716,7 @@ export class RangeHoodDevice extends BaseDevice {
   }
 
   async setFanActive(value: CharacteristicValue) {
-    this.platform.log.debug('Turning fan', value === this.platform.Characteristic.Active.ACTIVE ? 'On': 'Off');
+    this.platform.log.debug('Turning fan', value === this.platform.Characteristic.Active.ACTIVE ? 'On' : 'Off');
     this.state.fan.active = value === this.platform.Characteristic.Active.ACTIVE;
     await this.writeChannel('fan', this.fan_writer);
   }

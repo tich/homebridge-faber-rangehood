@@ -22,7 +22,7 @@ import {
 
 export enum AstarteRequestMethod {
   GET = 'get',
-  POST = 'post'
+  POST = 'post',
 }
 
 /**
@@ -41,7 +41,7 @@ export class Astarte {
     private readonly log: Logging,
     private readonly object_store: ObjectStore,
     // The services' base URLs. Only meant to be overridden by tests
-    base_urls: { auth?: string, api?: string, openid?: string } = {},
+    base_urls: { auth?: string; api?: string; openid?: string } = {},
   ) {
     this.openid_session = new OpenIDSession(log, base_urls.openid);
     this.openid_session.onTokenChanged((id_token: string, refresh_token: string) => {
@@ -52,7 +52,7 @@ export class Astarte {
       baseURL: base_urls.auth ?? ASTARTE_AUTH_URL,
       timeout: REQUEST_TIMEOUT_MS,
     });
-    this.api_request  = axios.create({
+    this.api_request = axios.create({
       baseURL: base_urls.api ?? ASTARTE_API_URL,
       timeout: REQUEST_TIMEOUT_MS,
     });
@@ -198,7 +198,7 @@ export class Astarte {
     device_id: string, api_interface: string, method: string, value: Record<string, unknown>, signal: AbortSignal | undefined, is_retry: boolean,
   ): Promise<Result<unknown, NetworkServiceError>> {
     const token = this.id_token;
-    const headers: Record<string,string> = { 'Authorization': `Bearer ${token!}` };
+    const headers: Record<string, string> = { Authorization: `Bearer ${token!}` };
     const response = await ResultAsync.fromPromise(
       this.api_request({
         url: `${ASTARTE_API_ENDPOINT}/${ASTARTE_REALM}/devices/${device_id}/interfaces/${api_interface}`,

@@ -124,7 +124,7 @@ export class FaberHomebridgePlatform implements DynamicPlatformPlugin {
   private async runSafely(description: string, task: () => Promise<void>) {
     try {
       await task();
-    } catch(error) {
+    } catch (error) {
       this.log.error('Unexpected error while', description, error);
     }
   }

@@ -12,7 +12,7 @@ const REFRESH_TOKEN_EXPIRED_MESSAGE =
 
 /**
  * A class that's in charge of maintaining a valid OAuth/OpenID ID token
- * 
+ *
  * Note that this class doesn't actively monitor the validity of the ID token.
  * It relies on the owner to notice that the ID token isn't working anymore.
  * The owner would then invoke `refreshToken` to tell this class to fetch a new one.
