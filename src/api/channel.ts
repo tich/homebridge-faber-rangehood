@@ -71,8 +71,9 @@ const NewEventFormat = zod.object({
  * Receives the changes that devices report, as they happen, through Astarte's real-time channels.
  *
  * It joins the user's room, and installs a volatile trigger for each watched device and interface. Volatile triggers
- * only live as long as the connection, so they're installed again whenever it reconnects. The connection is kept
- * alive with heartbeats, and re-established with a fresh token (they expire after an hour) and an exponential backoff.
+ * only live as long as the room has clients, so they're installed again whenever it reconnects. The connection is kept
+ * alive with heartbeats, and re-established with a fresh token and an exponential backoff. (A connection outlives its
+ * token: events keep arriving after the token expires.)
  * Listeners are told when their watch becomes inactive, since events may be missed until it's active again.
  */
 export class AstarteChannel {
@@ -258,7 +259,7 @@ export class AstarteChannel {
     } else if (event === 'new_event') {
       this.onNewEvent(payload);
     } else if ((event === 'phx_error' || event === 'phx_close') && topic === this.topic) {
-      // The server closed the room (e.g. the token expired). Reconnect, with a fresh token
+      // The server closed the room. Reconnect, with a fresh token
       this.log.debug('The push updates room was closed:', event);
       this.socket?.terminate();
     }
