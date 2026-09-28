@@ -8,7 +8,7 @@ import path from 'node:path';
 import { OpenIDSession } from '../src/api/openid.js';
 import { Astarte, AstarteRequestMethod } from '../src/api/astarte.js';
 import { ObjectStore } from '../src/lib/objectstore.js';
-import { errAsync } from 'neverthrow';
+import { errAsync, ResultAsync } from 'neverthrow';
 import {
   DeadlineExceededError,
   isTransientError,
@@ -20,7 +20,7 @@ import {
   UnknownResponseError,
 } from '../src/lib/errors.js';
 import { PluginConfig } from '../src/config.js';
-import { createLog, TestLog } from './helpers.js';
+import { createLog, flush, TestLog } from './helpers.js';
 
 interface Request {
   method: string;
@@ -204,14 +204,33 @@ describe('Astarte', () => {
   let store: ObjectStore;
   const config = { auth_mode: 'token', refresh_token: 'RT1', devices: [], fallback_poll_interval: 300 } as PluginConfig;
 
+  // The storage operations still running. Refreshed tokens are persisted in the background, so a test can end
+  // while that's still going on, and its file would appear while the directory is being removed
+  let storage_operations: Set<Promise<unknown>>;
+
   beforeEach(async () => {
     log = createLog();
     store_dir = mkdtempSync(path.join(os.tmpdir(), 'faber-test-'));
     store = new ObjectStore(store_dir);
     assert.ok((await store.init()).isOk());
+    storage_operations = new Set();
+    for (const method of ['getTokenData', 'setTokenData'] as const) {
+      const original = store[method].bind(store) as (...args: unknown[]) => ResultAsync<unknown, StorageError>;
+      Object.assign(store, { [method]: (...args: unknown[]) => {
+        const operation = original(...args);
+        const settled = Promise.resolve(operation).finally(() => storage_operations.delete(settled));
+        storage_operations.add(settled);
+        return operation;
+      } });
+    }
   });
-  afterEach(() => {
+  afterEach(async () => {
     mock.restoreAll();
+    // Wait for the storage to be idle. Reading the tokens is followed by writing them, so check again once that's done
+    while (storage_operations.size > 0) {
+      await Promise.allSettled(storage_operations);
+      await flush();
+    }
     rmSync(store_dir, { recursive: true, force: true });
   });
 
