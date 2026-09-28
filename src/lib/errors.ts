@@ -1,6 +1,17 @@
-export class InvalidConfigError extends Error {}
-export class UnknownDeviceTypeError extends Error {}
-export class NetworkServiceError extends Error {}
+/**
+ * Base class for the plugin's errors. Sets `name` to the actual error class,
+ * so that logs show e.g. `RequestRejectedError: …` rather than `Error: …`
+ */
+class PluginError extends Error {
+  constructor(message?: string, options?: ErrorOptions) {
+    super(message, options);
+    this.name = new.target.name;
+  }
+}
+
+export class InvalidConfigError extends PluginError {}
+export class UnknownDeviceTypeError extends PluginError {}
+export class NetworkServiceError extends PluginError {}
 export class UnknownResponseError extends NetworkServiceError {}
 export class TokenExpiredError extends NetworkServiceError {}
 /** The operation was given up on, since it couldn't complete within its deadline */
@@ -11,8 +22,9 @@ export class RequestRejectedError extends NetworkServiceError {
     super(`The request was rejected with HTTP status ${status}`);
   }
 }
-export class StorageError extends Error {}
-export class InvalidCacheError extends Error {}
+export class StorageError extends PluginError {}
+export class InvalidCacheError extends PluginError {}
+
 /**
  * Whether an error is likely to go away by itself (e.g. a network hiccup), so the failed operation is worth retrying.
  * `TokenExpiredError`, `UnknownResponseError`, and `RequestRejectedError` are also `NetworkServiceError`s,
