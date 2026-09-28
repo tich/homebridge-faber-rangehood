@@ -99,3 +99,4 @@ In addition to the above, the plugin now checks its config when Homebridge start
 1. Install the dependencies with `npm ci`
 2. Copy `test/config.example.json` to `test/hbConfig/config.json`, then fill in your refresh token and device ID (see [Running get_token.py](#running-get_tokenpy)). The `test/hbConfig` directory is gitignored, so your refresh token stays out of the repository
 3. Run `npm run watch` to build the plugin and run it in a local Homebridge instance, restarting it whenever the source changes
+4. Optionally, install the Homebridge UI with `npm install -g homebridge-config-ui-x`, to check the plugin's settings page at http://localhost:8581 while `npm run watch` runs. The example config already sets it up (without a login); without it, Homebridge just skips it
