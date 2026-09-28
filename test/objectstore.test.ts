@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, mock, test } from 'node:test';
 import assert from 'node:assert/strict';
-import fs, { mkdtempSync, rmSync } from 'node:fs';
+import fs, { mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { ObjectStore } from '../src/lib/objectstore.js';
@@ -24,6 +24,26 @@ describe('ObjectStore', () => {
   test('reports a storage it can\'t use', async () => {
     const result = await new ObjectStore('/dev/null/persist').init();
     assert.ok(result.isErr() && result.error instanceof StorageError);
+  });
+
+  test('reports tokens it can\'t read or store', async () => {
+    const storage_path = path.join(directory, 'persist');
+    const store = new ObjectStore(storage_path);
+    assert.ok((await store.init()).isOk());
+    assert.ok((await store.setTokenData({ hashed_auth_cfg: 'hash', id_token: 'ID', refresh_token: 'RT' })).isOk());
+
+    // Corrupted (e.g. by a crash while writing)
+    for (const file of readdirSync(storage_path)) {
+      writeFileSync(path.join(storage_path, file), 'not JSON');
+    }
+    const read = await store.getTokenData();
+    assert.ok(read.isErr() && read.error instanceof StorageError);
+
+    // Gone, and replaced by a file
+    rmSync(storage_path, { recursive: true });
+    writeFileSync(storage_path, '');
+    const write = await store.setTokenData({ hashed_auth_cfg: 'hash', id_token: 'ID', refresh_token: 'RT' });
+    assert.ok(write.isErr() && write.error instanceof StorageError);
   });
 
   // node-persist scans for expired items every 2 minutes by default. Its errors (e.g. once the directory is gone) would be

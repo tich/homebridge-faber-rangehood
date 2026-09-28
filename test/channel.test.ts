@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { AddressInfo } from 'node:net';
+import net, { AddressInfo } from 'node:net';
 import { WebSocket, WebSocketServer } from 'ws';
 import { err, ok, Result } from 'neverthrow';
 import { AstarteChannel, ChannelEvent } from '../src/api/channel.js';
@@ -160,6 +160,13 @@ describe('AstarteChannel', () => {
     await until(() => server.tokens.length >= 2, 1000);
   });
 
+  test('stays connected while heartbeats are answered', async () => {
+    channel = new AstarteChannel(log.log, fakeAstarte(), { ...options(), heartbeat_interval_ms: 100 });
+    channel.start();
+    await until(() => server.count('heartbeat') >= 4, 1000);
+    assert.equal(server.tokens.length, 1);
+  });
+
   test('reconnects when the server closes the room', async () => {
     channel = new AstarteChannel(log.log, fakeAstarte(), options());
     channel.start();
@@ -233,6 +240,26 @@ describe('AstarteChannel', () => {
     await sleep(150);
     assert.equal(server.tokens.length, 1);
     assert.deepEqual(listener.active, [true, false]);
+  });
+
+  test('stops cleanly while still connecting', async () => {
+    // Accepts connections, but never answers the WebSocket handshake
+    const connections: net.Socket[] = [];
+    const silent = net.createServer((connection) => connections.push(connection));
+    await new Promise<void>((resolve) => silent.listen(0, '127.0.0.1', resolve));
+    try {
+      channel = new AstarteChannel(log.log, fakeAstarte(),
+        { ...options(), url: `ws://127.0.0.1:${(silent.address() as AddressInfo).port}` });
+      channel.start();
+      await until(() => connections.length === 1);
+      // Closing a socket that's still connecting emits an error, which would crash Homebridge if nothing handled it
+      channel.stop();
+      await sleep(100);
+      assert.equal(connections.length, 1);
+    } finally {
+      connections.forEach((connection) => connection.destroy());
+      await new Promise((resolve) => silent.close(resolve));
+    }
   });
 
   test('never logs the token', async () => {

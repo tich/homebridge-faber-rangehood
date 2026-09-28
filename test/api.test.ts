@@ -1,4 +1,4 @@
-import { after, afterEach, before, beforeEach, describe, test } from 'node:test';
+import { after, afterEach, before, beforeEach, describe, mock, test } from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import { AddressInfo } from 'node:net';
@@ -8,10 +8,14 @@ import path from 'node:path';
 import { OpenIDSession } from '../src/api/openid.js';
 import { Astarte, AstarteRequestMethod } from '../src/api/astarte.js';
 import { ObjectStore } from '../src/lib/objectstore.js';
+import { errAsync } from 'neverthrow';
 import {
   DeadlineExceededError,
+  isTransientError,
   NetworkServiceError,
+  NoHoodsError,
   RequestRejectedError,
+  StorageError,
   TokenExpiredError,
   UnknownResponseError,
 } from '../src/lib/errors.js';
@@ -206,7 +210,12 @@ describe('Astarte', () => {
     store = new ObjectStore(store_dir);
     assert.ok((await store.init()).isOk());
   });
-  afterEach(() => rmSync(store_dir, { recursive: true, force: true }));
+  afterEach(() => {
+    mock.restoreAll();
+    rmSync(store_dir, { recursive: true, force: true });
+  });
+
+  const login = () => new Astarte(log.log, store, cloud.base_urls).init(config);
 
   async function initAstarte() {
     const astarte = new Astarte(log.log, store, cloud.base_urls);
@@ -242,6 +251,86 @@ describe('Astarte', () => {
     assert.ok((await astarte.init({ ...config, refresh_token: 'RT_NEW' })).isOk());
     assert.equal(new URLSearchParams(cloud.requests.find((r) => r.path.startsWith('/openid/token'))!.body).get('refresh_token'), 'RT_NEW');
   });
+
+  test('refreshes an expired ID token while logging in, and retries', async () => {
+    await initAstarte();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    cloud.id_token = 'ID_ELSEWHERE'; // The persisted one expired
+    cloud.requests.length = 0;
+    await initAstarte(); // Same config, same store
+    assert.equal(cloud.count('/openid/token'), 1);
+    assert.equal(cloud.count('/astarte-associator/user_info/'), 2);
+  });
+
+  test('refreshes an expired ID token while refreshing the Astarte token, and retries', async () => {
+    const astarte = await initAstarte();
+    cloud.requests.length = 0;
+    cloud.id_token = 'ID_ELSEWHERE';
+    cloud.astarte_token = 'AT2';
+    const result = await astarte.doRequest('PIN1', 'com.faberspa.connectedhood.HoodStatus', AstarteRequestMethod.GET, {});
+    assert.ok(result.isOk());
+    assert.equal(cloud.count('/openid/token'), 1);
+    assert.equal(cloud.count('/astarte-associator/tokens/'), 2);
+  });
+
+  for (const [label, endpoint] of [['user info', '/astarte-associator/user_info/'], ['Astarte token', '/astarte-associator/tokens/']]) {
+    test(`fails to log in when the ${label} request is still refused after refreshing the ID token`, async () => {
+      cloud.reply = (r) => r.path.startsWith(endpoint) ? { status: 403 } : undefined;
+      const result = await login();
+      assert.ok(result.isErr() && result.error instanceof RequestRejectedError && result.error.status === 403);
+      assert.equal(cloud.count(endpoint), 2);
+    });
+
+    test(`fails to log in when refreshing the ID token for the ${label} request fails`, async () => {
+      cloud.reply = (r) => {
+        if (r.path.startsWith(endpoint)) {
+          return { status: 403 };
+        }
+        // The refresh token is redeemed once to log in, then again after the 403
+        return r.path.startsWith('/openid/token') && cloud.count('/openid/token') > 1 ? { status: 400, body: { error: 'invalid_grant' } } : undefined;
+      };
+      const result = await login();
+      assert.ok(result.isErr() && result.error instanceof TokenExpiredError);
+      assert.equal(cloud.count(endpoint), 1);
+    });
+  }
+
+  for (const [label, endpoint, reply, expected] of [
+    ['a server error for the user info', '/astarte-associator/user_info/', { status: 503 }, NetworkServiceError],
+    ['unexpected user info', '/astarte-associator/user_info/', { status: 200, body: { data: {} } }, UnknownResponseError],
+    ['a server error for the Astarte token', '/astarte-associator/tokens/', { status: 503 }, NetworkServiceError],
+  ] as const) {
+    test(`classifies a failed login: ${label}`, async () => {
+      cloud.reply = (r) => r.path.startsWith(endpoint) ? reply : undefined;
+      const result = await login();
+      assert.ok(result.isErr() && result.error.constructor === expected);
+    });
+  }
+
+  test('fails to log in with an expired refresh token', async () => {
+    cloud.refresh_token = 'RT_ELSEWHERE';
+    const result = await login();
+    assert.ok(result.isErr() && result.error instanceof TokenExpiredError);
+  });
+
+  test('fails to log in when its storage fails', async () => {
+    mock.method(store, 'getTokenData', () => errAsync(new StorageError));
+    const result = await login();
+    assert.ok(result.isErr() && result.error instanceof StorageError);
+    assert.equal(cloud.requests.length, 0);
+  });
+
+  for (const [label, data] of [
+    ['no range hoods', { purifiers: { devices: [{ id: 'PUR1' }], token: 'AT1' } }],
+    ['an empty list of range hoods', { hoods: { devices: [], token: 'AT1' } }],
+  ] as const) {
+    test(`tells the user when their account has ${label}, without retrying`, async () => {
+      cloud.reply = (r) => r.path.startsWith('/astarte-associator/tokens/') ? { status: 200, body: { data } } : undefined;
+      const result = await login();
+      assert.ok(result.isErr() && result.error instanceof NoHoodsError && !isTransientError(result.error));
+      assert.match(log.at('error').join(), /Your Faber account has no range hoods/);
+    });
+  }
 
   test('refreshes an expired Astarte token and retries, sharing one refresh between concurrent requests', async () => {
     const astarte = await initAstarte();

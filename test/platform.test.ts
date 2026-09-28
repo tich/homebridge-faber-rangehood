@@ -50,8 +50,9 @@ function createPlatform(config: Record<string, unknown>, options: {
 
   // The fake cloud
   const cloud = {
-    init: (): Result<void, NetworkServiceError> => ok(),
+    init: (): Result<void, NetworkServiceError> | Promise<Result<void, NetworkServiceError>> => ok(),
     device_info_error: {} as Record<string, NetworkServiceError>,
+    device_info_delay_ms: 0,
     inits: 0,
     device_info_requests: {} as Record<string, number>,
   };
@@ -66,6 +67,9 @@ function createPlatform(config: Record<string, unknown>, options: {
     }
     if (api_interface.endsWith('DeviceDetails')) {
       cloud.device_info_requests[device_id] = (cloud.device_info_requests[device_id] ?? 0) + 1;
+      if (cloud.device_info_delay_ms > 0) {
+        await new Promise((resolve) => setTimeout(resolve, cloud.device_info_delay_ms));
+      }
       if (cloud.device_info_error[device_id]) {
         return err(cloud.device_info_error[device_id]);
       }
@@ -280,6 +284,38 @@ describe('FaberHomebridgePlatform', () => {
       await advance(600000, 1000);
       assert.equal(cloud.inits, 1);
       assert.equal(channel.stop.mock.callCount(), 1);
+      fixture = undefined;
+    });
+
+    for (const [label, result] of [['succeeds', ok()], ['fails with a network error', err(new NetworkServiceError)]] as const) {
+      test(`stops starting up when Homebridge shuts down while logging in, and logging in ${label}`, async () => {
+        const { launch, cloud, channel, registered, shutdown } = create({ ...CONFIG, devices: [{ id: 'PIN1' }] });
+        cloud.init = () => new Promise((resolve) => setTimeout(() => resolve(result), 1000));
+        const launched = launch();
+        await advance(500);
+        shutdown();
+        await advance(600000, 1000);
+        await launched;
+        assert.equal(cloud.inits, 1);
+        assert.equal(Object.keys(cloud.device_info_requests).length, 0);
+        assert.equal(registered.length, 0);
+        assert.equal(channel.start.mock.callCount(), 0);
+        fixture = undefined;
+      });
+    }
+
+    test('leaves the accessories alone when Homebridge shuts down while fetching the device info', async () => {
+      // Homebridge has already saved the accessory cache by then
+      const { launch, cloud, registered, updated, shutdown } = create({ ...CONFIG, devices: [{ id: 'PIN1' }, { id: 'PIN2' }] },
+        { cached: { PIN1: cachedDevice('PIN1') }, devices_in_account: ['PIN1', 'PIN2'] });
+      cloud.device_info_delay_ms = 1000;
+      const launched = launch();
+      await advance(500);
+      shutdown();
+      await advance(3000);
+      await launched;
+      assert.deepEqual(updated, []);
+      assert.equal(registered.length, 0);
       fixture = undefined;
     });
   });

@@ -7,7 +7,7 @@ import { err, ok } from 'neverthrow';
 import { RangeHoodDevice } from '../src/devices/rangehood.js';
 import type { ChannelEvent, ChannelListener } from '../src/api/channel.js';
 import type { FaberHomebridgePlatform } from '../src/platform.js';
-import { DeadlineExceededError, NetworkServiceError, RequestRejectedError } from '../src/lib/errors.js';
+import { DeadlineExceededError, NetworkServiceError, RequestRejectedError, TokenExpiredError, UnknownResponseError } from '../src/lib/errors.js';
 import { INFO_VERSION } from '../src/devices/factory.js';
 import { advance, createLog, FULL_FEATURES, loadPlatformAccessory, TestLog, useFakeTime } from './helpers.js';
 
@@ -252,6 +252,33 @@ describe('RangeHoodDevice', () => {
       await advance(200);
       assert.ok(isCommunicationFailure(write.error));
     });
+
+    test('only marks the command as failed after a network error', async () => {
+      hood = createHood();
+      await advance(3000);
+      hood.cloud.post_mode = new NetworkServiceError;
+      const write = track(hood.device.setFanSpeed(50));
+      await advance(200);
+      assert.ok(isCommunicationFailure(write.error));
+      assert.equal(hood.light!.getCharacteristic(Characteristic.On).statusCode, HAPStatus.SUCCESS);
+    });
+
+    for (const error of [new TokenExpiredError, new UnknownResponseError]) {
+      test(`marks the whole accessory as not responding when a command fails with ${error.name}`, async () => {
+        hood = createHood();
+        await advance(3000);
+        hood.cloud.post_mode = error;
+        const write = track(hood.device.setFanSpeed(50));
+        await advance(200);
+        assert.ok(isCommunicationFailure(write.error));
+        for (const [service, characteristic] of [
+          [hood.light, Characteristic.On], [hood.light, Characteristic.ColorTemperature], [hood.fan, Characteristic.RotationSpeed],
+          [hood.carbon, Characteristic.FilterLifeLevel], [hood.grease, Characteristic.FilterChangeIndication],
+        ] as const) {
+          assert.equal(service!.getCharacteristic(characteristic).statusCode, HAPStatus.SERVICE_COMMUNICATION_FAILURE);
+        }
+      });
+    }
 
     test('gives up on a command before HomeKit does, and cancels it', async () => {
       hood = createHood();
