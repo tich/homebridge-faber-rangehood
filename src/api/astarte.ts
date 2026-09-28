@@ -5,7 +5,9 @@ import zod from 'zod';
 import { err, ok, Result, ResultAsync } from 'neverthrow';
 import { OpenIDSession } from './openid.js';
 import { ObjectStore } from '../lib/objectstore.js';
-import { DeadlineExceededError, errorForHttpStatus, NetworkServiceError, StorageError, UnknownResponseError } from '../lib/errors.js';
+import {
+  DeadlineExceededError, errorForHttpStatus, NetworkServiceError, NoHoodsError, StorageError, UnknownResponseError,
+} from '../lib/errors.js';
 import type { PluginConfig } from '../config.js';
 import { toRedactedJSON, untilAborted } from '../lib/utils.js';
 import {
@@ -143,14 +145,16 @@ export class Astarte {
       return user_id;
     }
 
+    // The account's devices are grouped by type, each with its own token. Only range hoods are supported,
+    // and an account without any (e.g. with only other Faber devices) may not have a group for them at all
     const ResponseFormat = zod.object({
       data: zod.object({
-        hoods: zod.object({ // TODO do we have a different token for each device type?
+        hoods: zod.object({
           devices: zod.array(zod.object({
             id: zod.string(),
           })),
           token: zod.string(),
-        }),
+        }).optional(),
       }),
     });
 
@@ -177,13 +181,16 @@ export class Astarte {
       this.log.error('Failed to parse the Astarte token response:', parsed_response.error, 'Received:', toRedactedJSON(response.value.data));
       return err(new UnknownResponseError);
     }
-    if (this.devices === undefined) {
-      this.devices = [];
-      for (const device of parsed_response.data.data.hoods.devices) {
-        this.devices.push(device.id);
-      }
+    const hoods = parsed_response.data.data.hoods;
+    if (hoods === undefined || hoods.devices.length === 0) {
+      this.log.error('Your Faber account has no range hoods. Please add yours in the Faber Cloud App, and restart Homebridge');
+      this.id_token = undefined;
+      return err(new NoHoodsError);
     }
-    this.id_token = parsed_response.data.data.hoods.token;
+    if (this.devices === undefined) {
+      this.devices = hoods.devices.map((device) => device.id);
+    }
+    this.id_token = hoods.token;
     return ok();
   }
 
@@ -266,6 +273,7 @@ export class Astarte {
    * @returns An error if that failed:
    * - `StorageError` if the persisted tokens couldn't be read or written
    * - `TokenExpiredError` if all avenues for fetching a new ID token have expired
+   * - `NoHoodsError` if the account has no range hoods
    * - `UnknownResponseError` if we somehow failed to parse a response from the Astarte service
    * - `NetworkServiceError` if a temporary network issue prevented us from reaching the Astarte service
    */

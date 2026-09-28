@@ -6,6 +6,10 @@
 
 - Requires Homebridge 2, and Node.js 22.10 or later, 24, or 26, like Homebridge 2 itself. Homebridge 1 and Node.js 20 are no longer supported
 
+### Fixes
+
+- A Faber account without range hoods (e.g. with only other Faber devices) gets a clear error message, rather than "unexpected response"
+
 ### Other changes
 
 - Documented how the plugin receives updates in real time (see [docs/astarte_api.md](docs/astarte_api.md#real-time-updates-astarte-channels))

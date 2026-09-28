@@ -14,6 +14,8 @@ export class UnknownDeviceTypeError extends PluginError {}
 export class NetworkServiceError extends PluginError {}
 export class UnknownResponseError extends NetworkServiceError {}
 export class TokenExpiredError extends NetworkServiceError {}
+/** The Faber account has no range hoods (e.g. only other Faber devices), so there's nothing to control */
+export class NoHoodsError extends NetworkServiceError {}
 /** The operation was given up on, since it couldn't complete within its deadline */
 export class DeadlineExceededError extends NetworkServiceError {}
 /** The server refused the request (e.g. a 404, or a 403 even after refreshing the token), so retrying it won't help */
@@ -27,12 +29,13 @@ export class InvalidCacheError extends PluginError {}
 
 /**
  * Whether an error is likely to go away by itself (e.g. a network hiccup), so the failed operation is worth retrying.
- * `TokenExpiredError`, `UnknownResponseError`, and `RequestRejectedError` are also `NetworkServiceError`s,
+ * `TokenExpiredError`, `NoHoodsError`, `UnknownResponseError`, and `RequestRejectedError` are also `NetworkServiceError`s,
  * but they need the user to step in (e.g. to provide a new refresh token), so retrying won't help them.
  */
 export function isTransientError(error: unknown) {
   return error instanceof NetworkServiceError
-    && !(error instanceof TokenExpiredError) && !(error instanceof UnknownResponseError) && !(error instanceof RequestRejectedError);
+    && !(error instanceof TokenExpiredError) && !(error instanceof NoHoodsError)
+    && !(error instanceof UnknownResponseError) && !(error instanceof RequestRejectedError);
 }
 
 /**
